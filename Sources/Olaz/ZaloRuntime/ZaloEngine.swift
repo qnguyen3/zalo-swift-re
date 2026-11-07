@@ -36,7 +36,38 @@ final class ZaloEngine {
             case failed(String)
         }
         var step: Step = .generating
+        /// PNG or decoded SVG bytes from the official QR generator.
         var qrPNG: Data?
+        var awaitingReplacementQR = false
+
+        mutating func receiveQR(_ imageData: Data, event: String?) {
+            let generated = event == "qr" || event == "qr2"
+            guard !awaitingReplacementQR || generated else { return }
+            qrPNG = imageData
+            if generated {
+                awaitingReplacementQR = false
+                step = .waitingScan
+            }
+        }
+
+        mutating func receivePoll(_ json: [String: Any]) {
+            let data = json["data"] as? [String: Any] ?? json
+            let code = (json["error_code"] as? NSNumber)?.intValue ?? 0
+            // The official multilayer flow replaces the ticket and waits for QR2 to be scanned.
+            if code == -20,
+               let scanURL = data["chk_wait_scan"] as? String, !scanURL.isEmpty,
+               ["base64_qr", "qr_cnt", "ntk"].contains(where: { !(data[$0] as? String ?? "").isEmpty }) {
+                qrPNG = nil
+                awaitingReplacementQR = true
+                step = .generating
+                return
+            }
+            if let name = data["display_name"] as? String, !name.isEmpty {
+                step = .waitingConfirm(name: name, avatar: (data["avatar"] as? String).flatMap(URL.init(string:)))
+            } else if code != 0, let message = json["error_message"] as? String, !message.isEmpty {
+                step = .failed(message)
+            }
+        }
     }
 
     struct Profile: Equatable {
@@ -335,11 +366,16 @@ final class ZaloEngine {
         switch state["page"] as? String {
         case "login":
             guard case .login(var login) = phase else { return }
-            if let qr = state["qr"] as? String, let png = Self.decodeDataURL(qr) {
-                login.qrPNG = png
-                if state["event"] as? String == "qr" { login.step = .waitingScan }
-                phase = .login(login)
-                scheduleExpiry()
+            if let qr = state["qr"] as? String {
+                let decoded = Self.decodeDataURL(qr)
+                let format = qr.hasPrefix("data:image/png;base64,") ? "png-base64"
+                    : qr.hasPrefix("data:image/svg+xml;") ? "svg-data-url" : "other"
+                EngineLog.shared.write("qr-image event=\(state["event"] ?? "snapshot") format=\(format) chars=\(qr.count) bytes=\(decoded?.count ?? -1) displayable=\(decoded.flatMap(NSImage.init(data:)) != nil)")
+                if let imageData = decoded {
+                    login.receiveQR(imageData, event: state["event"] as? String)
+                    phase = .login(login)
+                    scheduleExpiry()
+                }
             }
         case "main" where state["convActions"] != nil:
             handleConversationActions(state: state)
@@ -396,13 +432,8 @@ final class ZaloEngine {
         let data = json["data"] as? [String: Any] ?? json
         let code = (json["error_code"] as? NSNumber)?.intValue ?? 0
         EngineLog.shared.write("qr-poll \(url.path()) error_code=\(code) data.keys=\(data.keys.sorted())")
-        if let name = data["display_name"] as? String, !name.isEmpty {
-            login.step = .waitingConfirm(name: name, avatar: (data["avatar"] as? String).flatMap(URL.init(string:)))
-            phase = .login(login)
-        } else if code != 0, let message = json["error_message"] as? String, !message.isEmpty {
-            login.step = .failed(message)
-            phase = .login(login)
-        }
+        login.receivePoll(json)
+        phase = .login(login)
     }
 
     /// The server sets `qr_timeout`; mirror the official page's expiry UI.
@@ -492,7 +523,11 @@ final class ZaloEngine {
     }
 
     static func decodeDataURL(_ url: String) -> Data? {
-        guard url.hasPrefix("data:"), let comma = url.firstIndex(of: ",") else { return nil }
-        return Data(base64Encoded: String(url[url.index(after: comma)...]))
+        guard url.hasPrefix("data:"), let comma = url.firstIndex(of: ","),
+              let payload = String(url[url.index(after: comma)...]).removingPercentEncoding,
+              !payload.isEmpty else { return nil }
+        let isBase64 = url[..<comma].split(separator: ";").dropFirst().contains { $0.lowercased() == "base64" }
+        // The official QR generator can switch from a Base64 PNG to a percent-encoded SVG at QR2.
+        return isBase64 ? Data(base64Encoded: payload) : Data(payload.utf8)
     }
 }

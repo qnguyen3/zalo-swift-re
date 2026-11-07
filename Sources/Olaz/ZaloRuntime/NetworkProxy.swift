@@ -110,12 +110,13 @@ final class NetworkProxy: NSObject, WKScriptMessageHandlerWithReply {
 
     // MARK: HTTP
 
-    private func performHTTP(_ body: [String: Any]) async -> [String: Any] {
+    static func makeRequest(from body: [String: Any]) throws -> URLRequest {
         guard let urlString = body["url"] as? String, let url = URL(string: urlString) else {
-            return ["error": "bad url"]
+            throw URLError(.badURL)
         }
-        var request = URLRequest(url: url)
-        request.httpMethod = body["method"] as? String ?? "GET"
+        let method = body["method"] as? String ?? "GET"
+        var request = URLRequest(url: APIURLBuilder.rebuild(url, method: method))
+        request.httpMethod = method
         if let timeout = (body["timeout"] as? NSNumber)?.doubleValue, timeout > 0 {
             request.timeoutInterval = timeout / 1000
         }
@@ -124,6 +125,13 @@ final class NetworkProxy: NSObject, WKScriptMessageHandlerWithReply {
         }
         if let encoded = body["body"] as? [String: Any] {
             Self.apply(encoded, to: &request)
+        }
+        return request
+    }
+
+    private func performHTTP(_ body: [String: Any]) async -> [String: Any] {
+        guard let request = try? Self.makeRequest(from: body), let url = request.url else {
+            return ["error": "bad url"]
         }
 
         do {
@@ -140,7 +148,7 @@ final class NetworkProxy: NSObject, WKScriptMessageHandlerWithReply {
                 "status": status,
                 "statusText": HTTPURLResponse.localizedString(forStatusCode: status),
                 "headers": headers,
-                "url": response.url?.absoluteString ?? urlString,
+                "url": response.url?.absoluteString ?? url.absoluteString,
                 "body": data.base64EncodedString(),
             ]
         } catch let error as URLError {

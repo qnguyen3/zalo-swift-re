@@ -105,6 +105,13 @@ ZaloMainProcess  ── Swift stand-in for Electron main.js: IPC channel handler
 * **Bridge table**: `Resources/bridge-table.json` maps all 450 table-driven preload members
   to their IPC channel + type, generated from the official `preload-render.js`.
   Semantics per channel: [`reanalysis/bridge-spec.md`](reanalysis/bridge-spec.md).
+* **Native API URLs**: `ZaloRuntime/APIURLBuilder.swift` rebuilds supported outgoing API queries in Swift,
+  using ctdozlite-style sorted parameters and UTF-8 percent encoding. It signs the known `reqqr`,
+  `getServerInfo`, `getLoginInfo`, and `loginByPasswv2` query shapes with MD5 over `zsecure` + endpoint tag
+  + values sorted by key; encrypted-login `ref`/`nretry` fields stay outside the signature. Unsigned
+  common-parameter queries are encoded without adding a signature. Unknown signed shapes, duplicate keys,
+  polling URLs and media URLs pass through unchanged. The renderer still supplies API operations,
+  encryption and session state; this is not a replacement of the official runtime with ctdozlite.
 * **Node parity**: `$znode.crypto` is reproduced on CommonCrypto/CryptoKit and verified
   byte-for-byte against Node (`Tests/OlazTests/RuntimeTests.swift`). The official
   client uses it to encrypt `zcid` and request params.
