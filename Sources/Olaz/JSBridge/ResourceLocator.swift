@@ -14,20 +14,19 @@ enum ResourceLocator {
     static func url(forSubdirectory subdirectory: String) -> URL? {
         let fm = FileManager.default
         // A resource bundle's files sit at its root (flat) or under Contents/Resources
-        // (what the swiftbuild backend emits); `Bundle.resourceURL` resolves both.
-        func resources(ofBundleAt url: URL) -> URL? {
-            fm.fileExists(atPath: url.path) ? (Bundle(url: url)?.resourceURL ?? url) : nil
+        // (what the swiftbuild backend emits). A flat bundle that has a top-level `Resources/`
+        // folder (ours does) makes `Bundle.resourceURL` point into that folder, so the root is
+        // searched as well.
+        func resources(ofBundleAt url: URL) -> [URL] {
+            guard fm.fileExists(atPath: url.path) else { return [] }
+            return [Bundle(url: url)?.resourceURL, url].compactMap { $0 }
         }
         var candidates: [URL] = []
         if let res = Bundle.main.resourceURL {
-            if let inner = resources(ofBundleAt: res.appendingPathComponent(resourceBundleName)) {
-                candidates.append(inner)
-            }
+            candidates += resources(ofBundleAt: res.appendingPathComponent(resourceBundleName))
             candidates.append(res)
         }
-        if let beside = resources(ofBundleAt: Bundle.main.bundleURL.appendingPathComponent(resourceBundleName)) {
-            candidates.append(beside)
-        }
+        candidates += resources(ofBundleAt: Bundle.main.bundleURL.appendingPathComponent(resourceBundleName))
         for base in candidates {
             let url = base.appendingPathComponent(subdirectory, isDirectory: true)
             var isDir: ObjCBool = false
@@ -36,7 +35,7 @@ enum ResourceLocator {
             }
         }
         // Development / `swift test` fallback.
-        if let res = Bundle.module.resourceURL {
+        for res in [Bundle.module.resourceURL, Bundle.module.bundleURL].compactMap({ $0 }) {
             let url = res.appendingPathComponent(subdirectory, isDirectory: true)
             if fm.fileExists(atPath: url.path) { return url }
         }
