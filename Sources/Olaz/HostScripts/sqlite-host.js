@@ -13,19 +13,19 @@
 //   host      the port protocol of the utility process: {"zmsg-port-msg-id": id, type: "invoke-msg-request",
 //             data: {typeID, data}, meta} answered with {…, type: "invoke-msg-response", error, result, meta}.
 //             typeID SQL_STATEMENT {connection: {fullname, version, sessional, …}, libMethod, statement} runs on the
-//             native SQLite in Swift (`SQLiteHost.swift`, bridge `$olazSqlite.*`) and answers {result}; DAL_UTILITY
+//             native SQLite in Swift (`SQLiteHost.swift`, bridge `$znode.sqliteHost.*`) and answers {result}; DAL_UTILITY
 //             (close / delete / partition keys / clear pools), DB_ENCRYPTION (never started here), DB_CORRUPTION and
 //             BACK_UP (unsupported) are answered like the official handlers. The schema-version handshake is the
 //             official one: a database at another `PRAGMA user_version` than the renderer asks for makes the host
 //             invoke the renderer back with NEED-SCHEMA-MIGRATION {fullname, currentVersion}; the renderer runs its
 //             migration statements (`migrate: true`) and sets the version, other statements wait.
 //
-// Active only when Swift chose the SQLite backend (`$olazSqlite.__enabled`); otherwise the page stays on IndexedDB.
+// Active only when Swift chose the SQLite backend (`$znode.sqliteHostEnabled`); otherwise the page stays on IndexedDB.
 (() => {
   'use strict';
   if (window.__zaloSqliteHost) return;
   const spec = window.__zaloBridgeSpec || {};
-  if (!spec.values || spec.values['$olazSqlite.__enabled'] !== true) return;
+  if (!spec.values || spec.values['$znode.sqliteHostEnabled'] !== true) return;
   const diag = (s) => { try { window.webkit.messageHandlers.zlog.postMessage('[sqlite-host] ' + s); } catch {} };
   const scrub = (e) => String((e && (e.name + ': ' + e.message)) || e).replace(/\d{6,}/g, '<id>').slice(0, 200);
 
@@ -35,7 +35,7 @@
   const RESPONSE = 'invoke-msg-response';
   const SKIP = 'skip-handle-msg';
   const MIGRATION_TIMEOUT_MS = 10 * 60 * 1000;
-  const native = (method, args) => window.__zaloBridge.callAsync('$olazSqlite.' + method, args);
+  const native = (method, args) => window.__zaloBridge.callAsync('$znode.sqliteHost.' + method, args);
 
   // ---- channel broker (main.js MsgChannel manager, SQLite host only) ----
   let sessionSeq = 0;
@@ -77,7 +77,7 @@
     try { channel.port.postMessage(message); } catch (e) { diag('respond failed: ' + scrub(e)); }
   };
   const invokeRenderer = (channel, data) => new Promise((resolve, reject) => {
-    const id = 'olaz-sqlite-host-' + (++invokeSeq);
+    const id = 'sqlite-host-' + (++invokeSeq);
     invokes.set(id, { resolve, reject });
     channel.port.postMessage({ [MSG_ID]: id, type: REQUEST, data, meta: { createdDttm: Date.now() } });
   });
@@ -117,7 +117,7 @@
       case 'DAL_UTILITY': return utility(data || {});
       case 'DB_ENCRYPTION': return encryption(data || {});
       case 'DB_CORRUPTION': return undefined;
-      case 'BACK_UP': throw new Error('Backup is not available in Olaz');
+      case 'BACK_UP': throw new Error('Backup is not supported');
       default: throw new Error(`No request handler found for '${typeID}'`);
     }
   };

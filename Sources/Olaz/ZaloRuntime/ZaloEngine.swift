@@ -222,8 +222,11 @@ final class ZaloEngine {
 
     private func boot(_ install: OfficialZaloInstall.Info) {
         clientVersion = install.version
+        // Everything that talks to Zalo (User-Agent, page query, media fetches) reports the
+        // runtime's own API version, exactly as the official main process of that build would.
+        ClientFingerprint.clientVersion = install.clientVersion
 
-        let platform = ZaloPlatform(appVersion: install.version)
+        let platform = ZaloPlatform(appVersion: install.version, clientVersion: install.clientVersion)
         let mainProcess = ZaloMainProcess(platform: platform)
         let ua = OfficialClientHost.userAgent(clientType: platform.identity.clientType,
                                               clientVersion: platform.identity.clientVersion)
@@ -248,7 +251,7 @@ final class ZaloEngine {
             }
         }
         host.bridge.trace = { key, args in
-            guard !key.contains("ZLog"), !key.hasPrefix("$zelectron.store"), !key.hasPrefix("$olazSqlite") else { return }
+            guard !key.contains("ZLog"), !key.hasPrefix("$zelectron.store"), !key.hasPrefix("$znode.sqliteHost") else { return }
             log.write("bridge \(key)\(EngineLog.shape(args))")
         }
         host.bridge.onHandlerError = { key, error in log.write("bridge-error \(key): \(error.localizedDescription)") }

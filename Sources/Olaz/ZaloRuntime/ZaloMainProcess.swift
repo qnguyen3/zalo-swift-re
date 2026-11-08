@@ -36,7 +36,7 @@ final class ZaloMainProcess {
     /// official IndexedDB → SQLite migration needs Electron's SQLite window), fresh installs start on SQLite, and
     /// `OLAZ_STORAGE=idb|sqlite` overrides for a run. `switchStorage` moves an install (its data starts over).
     let storage: StorageBackend
-    /// The native SQLite executor behind `$olazSqlite.*` (SQLite backend only).
+    /// The native SQLite executor behind `$znode.sqliteHost.*` (SQLite backend only).
     let sqlite: SQLiteHost?
 
     /// Hidden `shared-worker.html` window (Electron's `dbTask` process) and the task router between windows.
@@ -158,7 +158,7 @@ final class ZaloMainProcess {
             }
         }
         worker.bridge.trace = { key, args in
-            guard !key.contains("ZLog"), !key.hasPrefix("$zelectron.store"), !key.hasPrefix("$olazSqlite") else { return }
+            guard !key.contains("ZLog"), !key.hasPrefix("$zelectron.store"), !key.hasPrefix("$znode.sqliteHost") else { return }
             log.write("sw-bridge \(key)\(EngineLog.shape(args))")
         }
         worker.bridge.onHandlerError = { key, error in log.write("sw-bridge-error \(key): \(error.localizedDescription)") }
@@ -425,7 +425,7 @@ final class ZaloMainProcess {
         // Native helpers without a native module here: report "not supported" the
         // way main's mainless worker reports errors, so the renderer falls back.
         let unsupported: ZaloBridge.AsyncHandler = { _ in
-            ["error": ["name": "NotSupported", "message": "Not available in Olaz", "code": "ENOTSUP"]]
+            ["error": ["name": "NotSupported", "message": "Not supported", "code": "ENOTSUP"]]
         }
         bridge.handle("exec", unsupported)
         bridge.handle("exec_raw", unsupported)
@@ -469,7 +469,7 @@ final class ZaloMainProcess {
         // `$zFeatures.zaloCall.requestCompressedLogFile` feeds the call-log upload to Zalo's QoS server;
         // answered with the official error shape so the renderer skips the upload.
         bridge.handle("request-compressed-log-file") { _ in
-            ["status": 2, "data": ["message": "Not available in Olaz", "errorData": NSNull()]]
+            ["status": 2, "data": ["message": "Not supported", "errorData": NSNull()]]
         }
     }
 

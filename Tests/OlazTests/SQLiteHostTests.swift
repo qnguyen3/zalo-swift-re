@@ -38,7 +38,7 @@ import Foundation
         let h = try host()
         _ = try await h.run("shared/contacts", statement("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, score REAL, data BLOB)"))
         try await h.runs("shared/contacts", query: "INSERT INTO t (name, score, data) VALUES (?, ?, ?)",
-                         rows: [["a", 1.5, Data([1, 2, 3])], ["b", NSNumber(value: true), NSNull()]])
+                         rows: SQLiteHost.Unchecked(value: [["a", 1.5, Data([1, 2, 3])], ["b", NSNumber(value: true), NSNull()]]))
         try await h.serialize("shared/contacts", [
             .run(statement("INSERT INTO t (name) VALUES (?)", ["c"])),
             .runs(query: "INSERT INTO t (name) VALUES (?)", rows: [["d"], ["e"]]),
@@ -46,16 +46,18 @@ import Foundation
         let rows = try await h.all("shared/contacts", statement("SELECT id, name, score, data FROM t ORDER BY id"))
         #expect(rows.count == 5)
         #expect(rows[0]["name"] as? String == "a" && rows[0]["score"] as? Double == 1.5 && rows[0]["data"] as? Data == Data([1, 2, 3]))
-        #expect(rows[1]["score"] as? Int64 == 1 && rows[1]["data"] is NSNull) // booleans bind as integers, nulls come back as null
+        // Booleans bind as 1; `score` has REAL affinity, so 1 comes back as Double 1.0 (not Int64),
+        // and nulls come back as null.
+        #expect(rows[1]["score"] as? Double == 1 && rows[1]["data"] is NSNull)
         let one = try await h.get("shared/contacts", statement("SELECT name FROM t WHERE id = ?", [3]))
         #expect(one?["name"] as? String == "c")
         let none = try await h.get("shared/contacts", statement("SELECT name FROM t WHERE id = ?", [99]))
         #expect(none == nil)
-        let many = try await h.optimizedAll("shared/contacts", queries: ["SELECT name FROM t WHERE id = ?"], params: [[[1], [2]]])
+        let many = try await h.optimizedAll("shared/contacts", queries: ["SELECT name FROM t WHERE id = ?"], params: SQLiteHost.Unchecked(value: [[[1], [2]]]))
         #expect(many.map { $0["name"] as? String } == ["a", "b"])
         // A failing `runs` rolls its rows back.
         await #expect(throws: SQLiteHost.SQLiteError.self) {
-            try await h.runs("shared/contacts", query: "INSERT INTO t (id, name) VALUES (?, ?)", rows: [[100, "x"], [100, "y"]])
+            try await h.runs("shared/contacts", query: "INSERT INTO t (id, name) VALUES (?, ?)", rows: SQLiteHost.Unchecked(value: [[100, "x"], [100, "y"]]))
         }
         let after = try await h.all("shared/contacts", statement("SELECT count(*) AS n FROM t WHERE id = 100"))
         #expect(after.first?["n"] as? Int64 == 0)

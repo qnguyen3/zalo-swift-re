@@ -9,7 +9,7 @@ const { DatabaseSync } = require('node:sqlite');
 const dir = process.argv[2] || path.join(__dirname, '..', 'Sources', 'Olaz', 'HostScripts');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'olaz-sqlite-'));
 const logs = [];
-// ---- fake Swift: $olazSqlite.* over the bridge (same semantics as SQLiteHost.swift) ----
+// ---- fake Swift: $znode.sqliteHost.* over the bridge (same semantics as SQLiteHost.swift) ----
 const dbs = new Map(); const migrating = new Set();
 const fileOf = (name) => path.join(root, name + '.db');
 const codeName = { 1: 'SQLITE_ERROR', 19: 'SQLITE_CONSTRAINT' };
@@ -39,9 +39,9 @@ const calls = [];
 const ctx = {
   console, logs, setTimeout, clearTimeout, setInterval, clearInterval, Promise, JSON, Object, Array, Number, String, Map, Set, WeakMap, Math, RegExp, Error, Date, MessageChannel, MessagePort, MessageEvent, btoa, atob, Uint8Array, ArrayBuffer,
   webkit: { messageHandlers: {
-    zbridge: { postMessage: async (msg) => { if (msg.kind === 'call' && msg.path.startsWith('$olazSqlite.')) { calls.push(msg.path.slice(12)); return swift[msg.path.slice(12)](...msg.args); } if (msg.kind === 'subscribe') return null; throw new Error('unexpected ' + JSON.stringify(msg).slice(0, 80)); } },
+    zbridge: { postMessage: async (msg) => { if (msg.kind === 'call' && msg.path.startsWith('$znode.sqliteHost.')) { const m = msg.path.slice('$znode.sqliteHost.'.length); calls.push(m); return swift[m](...msg.args); } if (msg.kind === 'subscribe') return null; throw new Error('unexpected ' + JSON.stringify(msg).slice(0, 80)); } },
     zlog: { postMessage: (s) => logs.push(s) } } },
-  __zaloBridgeSpec: { globals: ['$zMsgChannel', '$olazSqlite'], members: { '$olazSqlite.__enabled': 'value' }, values: { '$olazSqlite.__enabled': true },
+  __zaloBridgeSpec: { globals: ['$zMsgChannel', '$znode'], members: { '$znode.sqliteHostEnabled': 'value' }, values: { '$znode.sqliteHostEnabled': true },
     ipc: { '$zMsgChannel.onReceiveTransferredPortV2': { channel: 'port-transferred-v2', type: 'SUBSCRIBE_V2' }, '$zMsgChannel.onChannelEstablished': { channel: 'channel-established', type: 'SUBSCRIBE' },
            '$zMsgChannel.requestOpenChannelTo': { channel: 'open-channel-to', type: 'NOTIFY' }, '$zMsgChannel.notifyPortDelivered': { channel: 'port-delivered', type: 'NOTIFY' } } },
 };

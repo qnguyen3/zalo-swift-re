@@ -111,14 +111,16 @@ actor MediaLoader {
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.timeoutIntervalForRequest = 10
         config.timeoutIntervalForResource = Self.fileDeadline
-        config.httpAdditionalHeaders = ["User-Agent": PinnedHTTPSClient.userAgent]
+        // Fallback only: every request also sets the headers itself in `applyClientHeaders`,
+        // which follows a runtime upgrade without recreating the sessions.
+        config.httpAdditionalHeaders = ["User-Agent": ClientFingerprint.userAgent]
         session = URLSession(configuration: config)
         let fileConfig = URLSessionConfiguration.default
         fileConfig.urlCache = nil
         fileConfig.requestCachePolicy = .reloadIgnoringLocalCacheData
         fileConfig.timeoutIntervalForRequest = Self.fileIdleTimeout     // idle timeout between received bytes
         fileConfig.timeoutIntervalForResource = 7 * 24 * 3600           // effectively no total deadline
-        fileConfig.httpAdditionalHeaders = ["User-Agent": PinnedHTTPSClient.userAgent]
+        fileConfig.httpAdditionalHeaders = ["User-Agent": ClientFingerprint.userAgent]
         fileSession = URLSession(configuration: fileConfig)
         self.resolver = resolver
         self.maxConcurrentDownloads = maxConcurrentDownloads
@@ -418,6 +420,63 @@ actor MediaLoader {
         "host", "content-length", "expect", "accept-encoding",
     ]
 
+    /// The flavour of a media request: which Chromium load it corresponds to.
+    enum RequestFlavour {
+        /// An `<img>` load: no-cors, image Accept.
+        case image
+        /// A `fetch()`/XHR by the renderer: cors mode.
+        case cors
+    }
+
+    /// Headers Chromium 108 sends with the equivalent load (captured from the official client —
+    /// `ClientFingerprint`, `reanalysis/wire-fingerprint.md`). Only names the caller did not set
+    /// are filled in. URLSession decodes gzip and brotli even when Accept-Encoding is set by us.
+    nonisolated static func applyClientHeaders(to request: inout URLRequest, flavour: RequestFlavour) {
+        func setDefault(_ name: String, _ value: String) {
+            if request.value(forHTTPHeaderField: name) == nil { request.setValue(value, forHTTPHeaderField: name) }
+        }
+        setDefault("User-Agent", ClientFingerprint.userAgent)
+        setDefault("sec-ch-ua", ClientFingerprint.secCHUA)
+        setDefault("sec-ch-ua-mobile", ClientFingerprint.secCHUAMobile)
+        setDefault("sec-ch-ua-platform", ClientFingerprint.secCHUAPlatform)
+        setDefault("accept-language", ClientFingerprint.acceptLanguage())
+        setDefault("accept-encoding", ClientFingerprint.acceptEncoding)
+        switch flavour {
+        case .image:
+            setDefault("Accept", ClientFingerprint.imageAccept)
+            setDefault("sec-fetch-dest", "image")
+            setDefault("sec-fetch-mode", "no-cors")
+        case .cors:
+            setDefault("Accept", "*/*")
+            setDefault("sec-fetch-dest", "empty")
+            setDefault("sec-fetch-mode", "cors")
+        }
+        setDefault("sec-fetch-site", "cross-site")
+    }
+
+    /// The same header set as a dict, for `PinnedHTTPSClient` — which builds its own HTTP/1.1
+    /// requests and cannot accept compressed responses (no Accept-Encoding passed).
+    nonisolated static func clientHeaders(_ flavour: RequestFlavour) -> [String: String] {
+        var headers: [String: String] = [
+            "sec-ch-ua": ClientFingerprint.secCHUA,
+            "sec-ch-ua-mobile": ClientFingerprint.secCHUAMobile,
+            "sec-ch-ua-platform": ClientFingerprint.secCHUAPlatform,
+            "accept-language": ClientFingerprint.acceptLanguage(),
+            "sec-fetch-site": "cross-site",
+        ]
+        switch flavour {
+        case .image:
+            headers["Accept"] = ClientFingerprint.imageAccept
+            headers["sec-fetch-dest"] = "image"
+            headers["sec-fetch-mode"] = "no-cors"
+        case .cors:
+            headers["Accept"] = "*/*"
+            headers["sec-fetch-dest"] = "empty"
+            headers["sec-fetch-mode"] = "cors"
+        }
+        return headers
+    }
+
     /// Headers safe to send to `url`: names are RFC 7230 tokens, values hold no CR/LF/control characters,
     /// hop-by-hop names are dropped, and sensitive ones only go to https Zalo hosts.
     nonisolated static func sanitizedHeaders(_ headers: [String: String], for url: URL) -> [String: String] {
@@ -458,6 +517,7 @@ actor MediaLoader {
         try failIfDead(url.host?.lowercased() ?? "")
         var request = URLRequest(url: url)
         for (name, value) in Self.sanitizedHeaders(headers, for: url) { request.setValue(value, forHTTPHeaderField: name) }
+        Self.applyClientHeaders(to: &request, flavour: .cors)
         let hub = FileProgress()
         let observer = progress.map { hub.add($0) }
         defer { if let observer { hub.remove(observer) } }
@@ -540,7 +600,9 @@ actor MediaLoader {
         return try await withDNSFallback(host: host, doh: {
             try await self.fetchViaDoHFetched(url, redirectsLeft: redirectsLeft)
         }, system: {
-            let (data, response) = try await self.session.data(for: URLRequest(url: url))
+            var request = URLRequest(url: url)
+            Self.applyClientHeaders(to: &request, flavour: .image)
+            let (data, response) = try await self.session.data(for: request)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             guard (200..<300).contains(status) else { throw LoadError.http(status) }
             self.store(data, for: url, contentType: response.mimeType)
@@ -675,7 +737,7 @@ actor MediaLoader {
         let addresses = try await resolver.resolve(host)
         let response: PinnedHTTPSClient.Response
         do {
-            response = try await PinnedHTTPSClient.get(url, addresses: addresses)
+            response = try await PinnedHTTPSClient.get(url, addresses: addresses, clientHeaders: Self.clientHeaders(.image))
         } catch {
             await resolver.invalidate(host)
             throw error
@@ -869,7 +931,8 @@ actor MediaLoader {
         do {
             response = try await PinnedHTTPSClient.download(url, addresses: addresses, to: temp,
                                                             idleTimeout: Self.fileIdleTimeout,
-                                                            maxBody: Self.maxFileBytes) { received, total in
+                                                            maxBody: Self.maxFileBytes,
+                                                            clientHeaders: Self.clientHeaders(.cors)) { received, total in
                 progress.report(received: received, total: total)
             }
         } catch {
@@ -951,10 +1014,12 @@ actor MediaLoader {
     private func fetchFileViaSession(_ url: URL, directory: URL, progress: FileProgress) async throws -> URL {
         progress.reset()
         let delegate = FileDownloadDelegate(progress: progress)
+        var request = URLRequest(url: url)
+        Self.applyClientHeaders(to: &request, flavour: .cors)
         let downloaded: URL
         let response: URLResponse
         do {
-            (downloaded, response) = try await fileSession.download(for: URLRequest(url: url), delegate: delegate)
+            (downloaded, response) = try await fileSession.download(for: request, delegate: delegate)
         } catch {
             if delegate.exceeded { throw LoadError.tooLarge }
             throw error

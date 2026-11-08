@@ -125,6 +125,7 @@ final class NetworkProxy: NSObject, WKScriptMessageHandlerWithReply {
         if let encoded = body["body"] as? [String: Any] {
             Self.apply(encoded, to: &request)
         }
+        Self.applyClientHeaders(to: &request)
 
         do {
             let (data, response) = try await session.data(for: request)
@@ -152,6 +153,32 @@ final class NetworkProxy: NSObject, WKScriptMessageHandlerWithReply {
         }
     }
 
+    /// Chromium's own multipart boundary: `----WebKitFormBoundary` + 16 chars of `[0-9A-Za-z]`
+    /// (Blink's `MultiPartBody` alphabet). The label is server-visible, so it must be the
+    /// official client's, not a Zalo-recognisable one of ours.
+    private nonisolated static let boundaryAlphabet = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+    nonisolated static func chromiumFormBoundary() -> String {
+        "----WebKitFormBoundary" + String((0..<16).map { _ in boundaryAlphabet.randomElement()! })
+    }
+
+    /// Headers Chromium 108 adds to every renderer request, which URLSession does not send at all
+    /// (and whose own Accept-Language/Accept-Encoding formats differ from Chromium's). The official
+    /// client sent exactly these on its API XHRs — notably **no** `Origin` and no `Referer`.
+    /// Values: `reanalysis/wire-fingerprint.md`.
+    nonisolated static func applyClientHeaders(to request: inout URLRequest) {
+        func setDefault(_ name: String, _ value: String) {
+            if request.value(forHTTPHeaderField: name) == nil { request.setValue(value, forHTTPHeaderField: name) }
+        }
+        setDefault("sec-ch-ua", ClientFingerprint.secCHUA)
+        setDefault("sec-ch-ua-mobile", ClientFingerprint.secCHUAMobile)
+        setDefault("sec-ch-ua-platform", ClientFingerprint.secCHUAPlatform)
+        setDefault("sec-fetch-dest", "empty")
+        setDefault("sec-fetch-mode", "cors")
+        setDefault("sec-fetch-site", "cross-site")
+        setDefault("accept-language", ClientFingerprint.acceptLanguage())
+        setDefault("accept-encoding", ClientFingerprint.acceptEncoding)
+    }
+
     private static func apply(_ encoded: [String: Any], to request: inout URLRequest) {
         func setDefaultContentType(_ value: String) {
             if request.value(forHTTPHeaderField: "Content-Type") == nil {
@@ -166,7 +193,7 @@ final class NetworkProxy: NSObject, WKScriptMessageHandlerWithReply {
         case "base64":
             request.httpBody = Data(base64Encoded: encoded["data"] as? String ?? "")
         case "formdata":
-            let boundary = "----OlazFormBoundary\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+            let boundary = Self.chromiumFormBoundary()
             var data = Data()
             for part in encoded["parts"] as? [[String: Any]] ?? [] {
                 let name = part["name"] as? String ?? ""

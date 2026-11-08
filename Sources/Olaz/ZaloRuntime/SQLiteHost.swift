@@ -6,7 +6,7 @@ import SQLite3
 /// Zalo PC 26.10 keeps every database (messages, conversations, contacts, search, …) in SQLite, served by a
 /// `utility-process-sqlite` Electron utility process that the renderer reaches through a MessagePort channel. In Olaz
 /// `HostScripts/sqlite-host.js` plays that process inside each page: it answers the official channel protocol and
-/// executes every statement here, through the `$olazSqlite.*` bridge members (`SQLiteHost.install`). This class
+/// executes every statement here, through the `$znode.sqliteHost.*` bridge members (`SQLiteHost.install`). This class
 /// reproduces what the official connection class does with node-sqlite3 (`main-dist/utility-process-sqlite.js`):
 ///
 /// - one database file per `fullname` under `<userData>/sqlite/_production/<fullname>.db` (the official
@@ -46,7 +46,7 @@ final class SQLiteHost: @unchecked Sendable {
     }
 
     /// JSON payloads (`[Any]`, rows) crossing the database queue; the values are never shared.
-    private struct Unchecked<T>: @unchecked Sendable { let value: T }
+    struct Unchecked<T>: @unchecked Sendable { let value: T }
 
     /// Schema-version handshake in flight for a database: later openers wait for it.
     private final class Migration {
@@ -217,9 +217,12 @@ final class SQLiteHost: @unchecked Sendable {
     }
 
     /// `runs`: one prepared statement bound with every row of `rows`, in a transaction.
-    func runs(_ fullname: String, query: String, rows: sending [[Any]]) async throws {
+    /// Rows arrive `Unchecked`-boxed: the bridge arguments are freshly decoded JSON, but Swift 6.4's
+    /// region isolation cannot prove that at the (main-actor → serial-queue) hop, and `sending` alone
+    /// no longer suffices for `[[Any]]`.
+    func runs(_ fullname: String, query: String, rows: Unchecked<[[Any]]>) async throws {
         let connection = try connection(fullname)
-        let boxed = Unchecked(value: rows)
+        let boxed = rows
         try await onQueue(connection) { c in
             try Self.transaction(c.db) {
                 let prepared = try Self.prepare(c.db, query)
@@ -274,16 +277,17 @@ final class SQLiteHost: @unchecked Sendable {
     }
 
     /// `optimized-all`: every query bound with each of its parameter rows; all rows concatenated.
-    func optimizedAll(_ fullname: String, queries: [String], params: sending [[[Any]]]) async throws -> [[String: Any]] {
+    /// Params arrive `Unchecked`-boxed (same reason as `runs`).
+    func optimizedAll(_ fullname: String, queries: [String], params: Unchecked<[[[Any]]]>) async throws -> [[String: Any]] {
         let connection = try connection(fullname)
-        let boxed = Unchecked(value: params)
+        let boxed = params
         return try await onQueue(connection) { c in
             var out: [[String: Any]] = []
-            let params = boxed.value
+            let rowsPerQuery = boxed.value
             for (index, query) in queries.enumerated() {
                 let prepared = try Self.prepare(c.db, query)
                 defer { sqlite3_finalize(prepared) }
-                for row in index < params.count ? params[index] : [] {
+                for row in index < rowsPerQuery.count ? rowsPerQuery[index] : [] {
                     sqlite3_reset(prepared)
                     sqlite3_clear_bindings(prepared)
                     try Self.bind(prepared, row, c.db)
@@ -451,32 +455,31 @@ final class SQLiteHost: @unchecked Sendable {
     }
 }
 
-// MARK: - Bridge members (`$olazSqlite.*`, called by sqlite-host.js)
+// MARK: - Bridge members (`$znode.sqliteHost.*`, called by sqlite-host.js)
 
 extension SQLiteHost {
     /// Registers the executor on a page's bridge. Arguments are the JSON the host script sends; results go back through
     /// the bridge's value conversion (bytes as `{__bytes}`, nil as undefined).
     @MainActor
     func install(on bridge: ZaloBridge) {
-        bridge.declareGlobal("$olazSqlite")
-        bridge.async("$olazSqlite.open") { [self] args in
+        bridge.async("$znode.sqliteHost.open") { [self] args in
             guard let name = args.string(0) else { throw ZaloBridge.BridgeError(message: "open: missing fullname") }
             let version = (args.count > 1 ? args[1] as? NSNumber : nil)?.intValue
             let result = try await open(name, requestedVersion: version, sessional: args.bool(2) ?? false)
             return ["userVersion": result.userVersion, "migrate": result.migrate]
         }
-        bridge.async("$olazSqlite.migrated") { [self] args in
+        bridge.async("$znode.sqliteHost.migrated") { [self] args in
             if let name = args.string(0) { migrated(name) }
             return nil
         }
-        bridge.async("$olazSqlite.exec") { [self] args in
+        bridge.async("$znode.sqliteHost.exec") { [self] args in
             guard let name = args.string(0), let method = args.string(1) else { throw ZaloBridge.BridgeError(message: "exec: bad arguments") }
             let statement = args.dict(2) ?? [:]
             switch method {
             case "run":
                 return try await run(name, Self.statement(statement))
             case "runs":
-                try await runs(name, query: Self.query(statement["query"]), rows: Self.rows(statement["params"]))
+                try await runs(name, query: Self.query(statement["query"]), rows: Unchecked(value: Self.rows(statement["params"])))
                 return nil
             case "all":
                 return try await all(name, Self.statement(statement))
@@ -485,7 +488,7 @@ extension SQLiteHost {
             case "optimized-all":
                 let queries = (statement["queries"] as? [Any] ?? []).map(Self.query)
                 let params = (statement["params"] as? [Any] ?? []).map(Self.rows)
-                return try await optimizedAll(name, queries: queries, params: params)
+                return try await optimizedAll(name, queries: queries, params: Unchecked(value: params))
             case "serialize":
                 let items = (statement["data"] as? [[String: Any]] ?? []).map { item -> SerializedItem in
                     if item["method"] as? String == "runs" { return .runs(query: Self.query(item["query"]), rows: Self.rows(item["params"])) }
@@ -497,22 +500,22 @@ extension SQLiteHost {
                 throw ZaloBridge.BridgeError(message: "exec: unknown method \(method)")
             }
         }
-        bridge.async("$olazSqlite.close") { [self] args in
+        bridge.async("$znode.sqliteHost.close") { [self] args in
             if let name = args.string(0) { await close(name) }
             return nil
         }
-        bridge.async("$olazSqlite.delete") { [self] args in
+        bridge.async("$znode.sqliteHost.delete") { [self] args in
             if let name = args.string(0) { await delete(name) }
             return nil
         }
-        bridge.async("$olazSqlite.partitionKeys") { [self] args in
+        bridge.async("$znode.sqliteHost.partitionKeys") { [self] args in
             args.string(0).map(partitionKeys) ?? []
         }
-        bridge.async("$olazSqlite.closeSessional") { [self] _ in
+        bridge.async("$znode.sqliteHost.closeSessional") { [self] _ in
             await closeSessional()
             return nil
         }
-        bridge.async("$olazSqlite.closeAll") { [self] _ in
+        bridge.async("$znode.sqliteHost.closeAll") { [self] _ in
             await closeAll()
             return nil
         }

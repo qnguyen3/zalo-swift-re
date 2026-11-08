@@ -1327,7 +1327,7 @@
       try {
         const info = await S.groups.getFullInfoGroupById(convId, profileSrc().DONT_REQ_SERVER);
         if (!info || !Array.isArray(info.topMember)) return [];
-        const helper = registry.getZTagNameHelperById('olaz-composer');
+        const helper = registry.getZTagNameHelperById('composer');
         helper.initState(meNow());
         for (const uid of Array.isArray(mentioned) ? mentioned : []) helper.isMentioned[String(uid)] = true;
         const text = '@' + String(query || '');
