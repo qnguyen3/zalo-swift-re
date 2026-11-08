@@ -73,15 +73,44 @@ the rest of the header set is the same. `MediaLoader` mirrors the two flavours
   (`gzip, deflate`) are overridden with Chromium's values; URLSession decodes both
   gzip and brotli even when the header is set explicitly (verified locally).
 
-## Remaining, accepted differences
+## TLS / HTTP-2 fingerprint — matched (FingerprintHelper)
 
-- **TLS/HTTP fingerprint**: URLSession's ClientHello and HTTP/2 SETTINGS are
-  Apple's, not Chromium 108's. Only a Chromium network stack could match this.
+The one gap URLSession could never close is now closed by `FingerprintHelper/`: a Go
+child process (`olaz-fingerprint-helper`, built by `scripts/build-fingerprint-helper.sh`,
+bundled into the app) that performs the requests with Chromium 108's exact handshake.
+
+- `NetworkProxy` (renderer HTTP + the realtime websocket) and `MediaLoader` (images,
+  files, header-authenticated downloads) route through it; URLSession and the DoH path
+  remain as automatic fallbacks, used only when the helper cannot start or dies —
+  an upstream failure (timeout, HTTP error) is a real result and is never retried on
+  the other stack, so a retry never switches fingerprint.
+- Verified through https://tls.peet.ws (2026-11-08): JA3
+  `771,4865-…-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513-21,29-23-24,0`
+  (Chrome's famously stable desktop JA3), JA4 `t13d1516h2_8daaf6152771_e5627efa2ab1`
+  (Chrome 97–110), and Chrome's Akamai HTTP/2 fingerprint
+  `1:65536;2:0;3:1000;4:6291456;6:262144|15663105|0|m,a,s,p`.
+- Built on `bogdanfinn/tls-client` (BSD-3) with its `Chrome_108` profile (utls
+  ClientHello + patched http2 with Chrome's SETTINGS/priorities, connection pooling);
+  websockets dial through the same ClientHello spec (`bogdanfinn/utls` + gorilla fork).
+  Header order is pinned via fhttp's `HeaderOrderKey` — headers not registered there
+  are silently dropped, custom headers included.
+- When `ZaloRuntime.pinned` moves to a newer Zalo, check whether its Electron moved
+  (the app bundle's `Electron Framework` version) and re-capture; the profile name
+  lives in `FingerprintHelper/main.go` (`profileName`) and `profiles.Chrome_108`.
+
+Operational notes: the helper speaks the protocol documented in
+`FingerprintHelper/protocol.go` over a unix socket in `~/Library/Application Support/Olaz`;
+`FP_DEBUG=<file>` logs its received requests. Do not `cp` a new binary over
+`build/olaz-fingerprint-helper` — rebuild in place (`scripts/build-fingerprint-helper.sh`),
+an overwritten binary gets killed at exec (macOS provenance).
+
+## Remaining, accepted differences
 - **Telemetry Olaz does not send**: main-process Sentry (sentrypc.api.zalo.me),
   Google Analytics (`log-ga`), the binary updater's check, call-log uploads, and —
   remote-gated — the action/zlog uploads (`upload_log_client`). The renderer's QoS
   reporter does run (qos.talk.zing.vn/api/qos/uploadpc), unchanged from official.
-- **DoH fallback path** (`PinnedHTTPSClient`): HTTP/1.1, `Accept-Encoding: identity`,
-  `Connection: close` — used only when system DNS fails for a Zalo CDN host.
-- The WebSocket upgrade offers no `Sec-WebSocket-Extensions: permessage-deflate`
-  (URLSession does not negotiate compression); Chromium does offer it.
+- **DoH fallback path** (`PinnedHTTPSClient`) and the URLSession fallbacks generally:
+  Apple's fingerprint — used only when the helper is unavailable or (DoH) when system
+  DNS fails for a Zalo CDN host.
+- The helper's websocket upgrade offers `permessage-deflate` like Chromium, but with
+  gorilla's `client_max_window_bits=15` spelling rather than Chromium's valueless form.

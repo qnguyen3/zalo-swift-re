@@ -221,6 +221,8 @@ final class ZaloEngine {
     }
 
     private func boot(_ install: OfficialZaloInstall.Info) {
+        // Chromium-fingerprint network stack: ready before the renderer's first requests.
+        FingerprintProxy.shared.warmUp()
         clientVersion = install.version
         // Everything that talks to Zalo (User-Agent, page query, media fetches) reports the
         // runtime's own API version, exactly as the official main process of that build would.

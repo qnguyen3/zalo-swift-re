@@ -75,10 +75,13 @@ final class ZaloMainProcess {
         storage = Self.chooseStorage(platform: platform)
         sqlite = storage == .sqlite ? SQLiteHost(root: platform.userData.appendingPathComponent("sqlite/_production", isDirectory: true)) : nil
         mainLog.notice("storage backend: \(self.storage.rawValue, privacy: .public)")
-        // main `stop()`: the call helper does not outlive the app.
+        // main `stop()`: the call helper and the fingerprint helper do not outlive the app.
         terminationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.callBridge?.shutdown() }
+            MainActor.assumeIsolated {
+                self?.callBridge?.shutdown()
+                FingerprintProxy.shared.shutdown()
+            }
         }
     }
 
