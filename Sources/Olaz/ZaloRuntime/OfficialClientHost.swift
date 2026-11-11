@@ -156,9 +156,14 @@ final class OfficialClientHost: NSObject {
         while openPanelBusy { await withCheckedContinuation { openPanelWaiters.append($0) } }
         openPanelBusy = true
         let id = UUID()
-        pendingOpenPanel = (id, urls)
+        let token = id.uuidString
+        let resolvedURLs = urls.map { $0.resolvingSymlinksInPath() }
+        pendingOpenPanel = (id, resolvedURLs)
+        schemeHandler.pendingFiles = resolvedURLs
+        schemeHandler.pendingBatches[token] = resolvedURLs
+        let taggedScript = "window.__olazPendingPickToken = \"\(token)\"; \(script)"
         let run = Task {
-            let value = await self.evaluate(script)
+            let value = await self.evaluate(taggedScript)
             self.finishedPicks.insert(id)
             return JSBox(value: value)
         }
@@ -168,6 +173,8 @@ final class OfficialClientHost: NSObject {
         openPanelBusy = false
         if !openPanelWaiters.isEmpty { openPanelWaiters.removeFirst().resume() }
         let result = await run.value.value
+        schemeHandler.pendingBatches.removeValue(forKey: token)
+        if schemeHandler.pendingBatches.isEmpty { schemeHandler.pendingFiles = [] }
         finishedPicks.remove(id)
         return result
     }
@@ -244,9 +251,14 @@ extension OfficialClientHost: WKNavigationDelegate {
 
 final class AsarSchemeHandler: NSObject, WKURLSchemeHandler {
     static let bridgeSyncPath = "/__olaz/bridge-sync"
+    static let pendingFilesPath = "/__olaz/pending-files"
+    static let pendingFilesPrefix = "/__olaz/pending-files/"
+    static let pendingFilePrefix = "/__olaz/pending-file/"
     let asar: AsarArchive
     let root: String
     weak var bridge: ZaloBridge?
+    var pendingFiles: [URL] = []
+    var pendingBatches: [String: [URL]] = [:]
 
     init(asar: AsarArchive, root: String) {
         self.asar = asar
@@ -262,6 +274,52 @@ final class AsarSchemeHandler: NSObject, WKURLSchemeHandler {
             respond(task, url: url, data: data, mime: "application/json")
             return
         }
+        if url.path() == Self.pendingFilesPath || url.path().hasPrefix(Self.pendingFilesPrefix) {
+            let token = url.path().hasPrefix(Self.pendingFilesPrefix)
+                ? String(url.path().dropFirst(Self.pendingFilesPrefix.count))
+                : ""
+            let urls = MainActor.assumeIsolated {
+                token.isEmpty ? pendingFiles : (pendingBatches[token] ?? pendingFiles)
+            }
+            let list: [[String: Any]] = urls.enumerated().map { index, fileURL in
+                let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
+                let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? Date().timeIntervalSince1970
+                let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+                return [
+                    "index": index,
+                    "name": fileURL.lastPathComponent,
+                    "path": fileURL.resolvingSymlinksInPath().path,
+                    "mime": Self.mime(for: fileURL.path),
+                    "size": size,
+                    "lastModified": Int64((mtime * 1000).rounded())
+                ]
+            }
+            let data = (try? JSONSerialization.data(withJSONObject: list)) ?? Data("[]".utf8)
+            respond(task, url: url, data: data, mime: "application/json")
+            return
+        }
+        if url.path().hasPrefix(Self.pendingFilePrefix) {
+            let tail = String(url.path().dropFirst(Self.pendingFilePrefix.count))
+            let parts = tail.split(separator: "/", omittingEmptySubsequences: true)
+            let urls: [URL]
+            let indexOpt: Int?
+            if parts.count == 2 {
+                let token = String(parts[0])
+                indexOpt = Int(parts[1])
+                urls = MainActor.assumeIsolated { pendingBatches[token] ?? pendingFiles }
+            } else {
+                indexOpt = Int(tail)
+                urls = MainActor.assumeIsolated { pendingFiles }
+            }
+            if let index = indexOpt, urls.indices.contains(index),
+               let data = try? Data(contentsOf: urls[index]) {
+                respond(task, url: url, data: data, mime: Self.mime(for: urls[index].path))
+                return
+            }
+            task.didReceive(HTTPURLResponse(url: url, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: [:])!)
+            task.didFinish()
+            return
+        }
         let path = url.path()
         let candidates = ["\(root)\(path)", String(path.dropFirst())]
         guard let data = candidates.lazy.compactMap({ self.asar.read($0) }).first else {
@@ -273,7 +331,9 @@ final class AsarSchemeHandler: NSObject, WKURLSchemeHandler {
         }
         // The DAL worker hosts the sync-v2 sub-worker (DB writes); see `workerPrelude`.
         var body = data
-        if path.hasPrefix("/dal-worker."), path.hasSuffix(".js") { body = Data(Self.workerPrelude.utf8) + data }
+        if (path.hasPrefix("/dal-worker.") || path.hasPrefix("/mainless-worker.")), path.hasSuffix(".js") {
+            body = Data(Self.workerPrelude.utf8) + data
+        }
         if path.hasPrefix("/sync-v2-sub-worker."), path.hasSuffix(".js") { body = Self.exposeWebpackRequire(in: body) }
         if path.hasPrefix("/lazy/main-startup."), path.hasSuffix(".js") { body = Self.patchSyncGlobalIdResolver(in: body) }
         #if DEBUG
