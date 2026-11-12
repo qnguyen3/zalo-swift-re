@@ -24,7 +24,9 @@ enum EngineProbe {
         print("[probe] Zalo \(install.version) from \(install.appURL.path)")
         OfficialClientHost.diagnostics = { print($0) }
 
-        let platform = ZaloPlatform(appVersion: install.version)
+        // Same identity the app uses: the runtime's own client version, not the pinned default.
+        ClientFingerprint.clientVersion = install.clientVersion
+        let platform = ZaloPlatform(appVersion: install.version, clientVersion: install.clientVersion)
         let mainProcess = ZaloMainProcess(platform: platform)
         let ua = OfficialClientHost.userAgent(clientType: platform.identity.clientType, clientVersion: platform.identity.clientVersion)
         let host = OfficialClientHost(install: install, userAgent: ua) { bridge in
@@ -42,8 +44,8 @@ enum EngineProbe {
             var s = state
             if let qr = s["qr"] as? String {
                 if let out = ProcessInfo.processInfo.environment["OLAZ_QR_OUT"],
-                   let comma = qr.firstIndex(of: ","), let png = Data(base64Encoded: String(qr[qr.index(after: comma)...])) {
-                    try? png.write(to: URL(fileURLWithPath: out))
+                   let image = Self.exportedQRData(from: qr) {
+                    try? image.write(to: URL(fileURLWithPath: out))
                 }
                 s["qr"] = "<\(qr.count) chars \(qr.prefix(30))…>"
             }
@@ -100,5 +102,17 @@ enum EngineProbe {
             }
         }
         app.run()
+    }
+
+    /// `OLAZ_QR_OUT` is meant to be a scannable image. The server's QR is a base64 PNG, but the renderer's
+    /// trusted-device QR2 is a percent-encoded SVG (`genSecondQR`); rasterize only the SVG and keep PNG bytes intact.
+    static func exportedQRData(from source: String) -> Data? {
+        guard let data = ZaloEngine.decodeDataURL(source) else { return nil }
+        guard source.lowercased().hasPrefix("data:image/svg+xml") else { return data }
+        guard let image = NSImage(data: data),
+              let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let png = bitmap.representation(using: .png, properties: [:]) else { return data }
+        return png
     }
 }
