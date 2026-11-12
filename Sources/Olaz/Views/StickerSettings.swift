@@ -14,7 +14,7 @@ struct StickerSettingsSection: View {
 
     var body: some View {
         Section {
-            Toggle(isOn: Binding(get: { state.setting?.enabled ?? true }, set: change)) {
+            Toggle(isOn: Binding(get: { state.setting?.enabled ?? true }, set: { change($0) })) {
                 Text("Hiện gợi ý Sticker phù hợp với nội dung tin nhắn đang soạn")
             }
             .disabled(state.setting == nil || busy)
