@@ -19,6 +19,9 @@ struct ChatView: View {
     @State private var columnWidth: CGFloat = 400
     /// A loaded message to bring on screen (a pin of the pinned bar).
     @State private var jumpTarget: String?
+    /// The account the unsent draft belongs to (captured when it was restored): after a logout the view is torn down
+    /// with the previous account's text, which must not be saved into the next account's drafts.
+    @State private var draftOwner: String?
 
     private enum SendNotice { case restored, like }
 
@@ -110,8 +113,21 @@ struct ChatView: View {
         .messageActionPresenter(conversationId: id)
         .onAppear {
             focusTick += 1
+            // Saved draft first, then a failed send on top of it: the failed text is always put back (`restoreFailedDraft`).
+            restoreSavedDraft(for: id)
             restoreFailedDraft()
             markReadIfNeeded(last: loaded?.last, newIncomingOnly: false)
+        }
+        // `.id(conversation.id)` tears this view down on every switch: the unsent text goes to the engine.
+        .onDisappear { saveDraft(for: id) }
+        .onChange(of: conversation.id) { old, new in
+            // Defensive: the same view reused for another conversation.
+            saveDraft(for: old)
+            draft = ""
+            draftMentions = []
+            replyTo = nil
+            restoreSavedDraft(for: new)
+            restoreFailedDraft()
         }
         .onChange(of: engine.failedDrafts.revision) { _, _ in restoreFailedDraft() }
         .onChange(of: loaded?.last?.id) { _, _ in markReadIfNeeded(last: engine.messages[id]?.last, newIncomingOnly: true) }
@@ -210,6 +226,22 @@ struct ChatView: View {
             // composer shown for this conversation takes it back (`restoreFailedDraft`).
             engine.failedDrafts.stash(ComposerDraft(text: sentDraft, mentions: sentMentions, replyTo: sentReply), for: id)
         }
+    }
+
+    /// The text left unsent the last time this conversation was open. Only into an empty composer: anything already there
+    /// (a failed send put back) is newer.
+    private func restoreSavedDraft(for convId: String) {
+        draftOwner = engine.profile?.userId
+        guard draft.isEmpty, let saved = engine.draft(for: convId), !saved.text.isEmpty else { return }
+        draft = saved.text
+        draftMentions = saved.mentions
+    }
+
+    /// Keeps the unsent text for the next visit (empty text removes the saved draft). Skipped once the account changed.
+    private func saveDraft(for convId: String) {
+        guard !convId.isEmpty, let current = engine.profile?.userId, draftOwner == nil || draftOwner == current else { return }
+        let blank = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        engine.saveDraft(blank ? "" : draft, mentions: blank ? [] : draftMentions, for: convId)
     }
 
     /// Puts a failed draft back after whatever is in the composer now (typed meanwhile, or restored earlier);
