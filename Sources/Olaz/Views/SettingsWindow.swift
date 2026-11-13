@@ -6,7 +6,7 @@ struct SettingsView: View {
     var body: some View {
         TabView {
             Tab("Chung", systemImage: "gearshape") {
-                SettingsPane(height: 210) { GeneralSettings() }
+                SettingsPane(height: 270) { GeneralSettings() }
             }
             Tab("Giao diện", systemImage: "paintpalette") {
                 SettingsPane(height: 700) { AppearanceSettings() }
@@ -43,6 +43,8 @@ private struct SettingsPane<Content: View>: View {
 
 private struct GeneralSettings: View {
     @AppStorage("olaz.appearance") private var appearance = Appearance.system
+    @AppStorage(OlazPrefs.globalScreenshot) private var globalScreenshot = true
+    @Environment(ZaloEngine.self) private var engine
 
     var body: some View {
         Section("Chế độ giao diện") {
@@ -50,6 +52,10 @@ private struct GeneralSettings: View {
                 ForEach(Appearance.allCases) { Text($0.title).tag($0) }
             }
             .pickerStyle(.segmented)
+        }
+        Section("Phím tắt") {
+            Toggle("Chụp màn hình toàn hệ thống (⌥⌘S)", isOn: $globalScreenshot)
+                .onChange(of: globalScreenshot) { _, _ in engine.updateScreenshotHotKey() }
         }
         // Only a bundled app has a version; a bare `swift run` binary has none to show.
         if let version = Self.version {

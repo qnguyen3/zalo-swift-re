@@ -161,7 +161,11 @@ actor MediaLoader {
 
     /// Already-decoded image, if any; lets views render without a placeholder flash.
     nonisolated static func cachedImage(for url: URL, maxPixelSize: CGFloat) -> NSImage? {
-        memory.object(forKey: imageKey(url, pixelBucket(maxPixelSize)) as NSString)?.image
+        if url.scheme == "data" {
+            guard let data = ZaloEngine.decodeDataURL(url.absoluteString) else { return nil }
+            return decode(data, maxPixelSize: pixelBucket(maxPixelSize))
+        }
+        return memory.object(forKey: imageKey(url, pixelBucket(maxPixelSize)) as NSString)?.image
     }
 
     nonisolated static func cachedAnimatedImage(for url: URL) -> NSImage? {
@@ -237,6 +241,13 @@ actor MediaLoader {
     /// ~113 MB and would evict most thumbnails and avatars). Concurrent callers still share one download and decode;
     /// uncached ones are told apart in the flight table so a cached caller never joins a flight that skips the store.
     func image(for url: URL, maxPixelSize: CGFloat, cache: Bool = true) async -> SendableImage? {
+        if url.scheme == "data" {
+            guard let data = ZaloEngine.decodeDataURL(url.absoluteString) else { return nil }
+            guard let decoded = await Task.detached(priority: .userInitiated, operation: {
+                Self.decode(data, maxPixelSize: Self.pixelBucket(maxPixelSize))
+            }).value else { return nil }
+            return SendableImage(image: decoded)
+        }
         let pixels = Self.pixelBucket(maxPixelSize)
         let key = Self.imageKey(url, pixels)
         if let hit = Self.memory.object(forKey: key as NSString) { return SendableImage(image: hit.image) }
@@ -344,6 +355,10 @@ actor MediaLoader {
 
     /// Bytes for `url` (cached, de-duplicated, concurrency-capped, with an overall deadline).
     func data(for url: URL, deadline: TimeInterval = MediaLoader.imageDeadline) async throws -> Data {
+        if url.scheme == "data" {
+            guard let data = ZaloEngine.decodeDataURL(url.absoluteString) else { throw LoadError.badURL }
+            return data
+        }
         if url.isFileURL {
             // Files the official download path wrote under ZaloDownloads (`resolveMedia`), or our own caches.
             guard Self.isAllowedLocalFile(url) else { throw LoadError.badURL }

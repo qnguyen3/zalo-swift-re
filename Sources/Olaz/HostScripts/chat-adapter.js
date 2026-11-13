@@ -512,7 +512,8 @@
         if (o.action === 'msginfo.actionlist') { const txt = infoText(p) || str(o.title); return notice('info.circle', txt); }
         return { kind: { type: 'text' }, text: asText || str(o.title) || str(o.msg) || str(o.description) };
       case MSG.PHOTO: case MSG.PHOTO_2:
-        return { kind: { type: 'photo', url: o.normalUrl || o.hdUrl || o.oriUrl || o.thumbUrl || str(o.href) || str(o.thumb), width: num(p.width || o.width), height: num(p.height || o.height) }, text: str(o.title) || FALLBACK.photo };
+        const photoUrl = o.normalUrl || o.hdUrl || o.oriUrl || o.thumbUrl || str(o.href) || str(o.thumb) || str(o.previewThumb) || str(o.img);
+        return { kind: { type: 'photo', url: photoUrl, width: num(p.width || o.width), height: num(p.height || o.height) }, text: str(o.title) || FALLBACK.photo };
       case MSG.DOODLE:
         return { kind: { type: 'photo', url: str(o.href) || str(o.thumb), width: num(p.width), height: num(p.height) }, text: FALLBACK.doodle };
       case MSG.STICKER: case MSG.STICKER_2: case MSG.STICKER_GROUP:
@@ -898,7 +899,8 @@
     const ml = conv.msgList || {};
     return ml.hasMoreLocal !== false || (ml.hasMoreCloud !== false && ml.hasMoreCloud !== 0 && ml.hasMoreCloud !== undefined);
   };
-  const schedule = () => { if (!track.id || timer) return; timer = setTimeout(() => { timer = null; flush(); }, 150); };
+  const schedule = () => { if (!track.id || timer) return; timer = setTimeout(() => { timer = null; flush(); }, 40); };
+  const flushNow = () => { if (timer) { clearTimeout(timer); timer = null; } flush(); };
   const flush = () => {
     const id = track.id;
     if (!id) return;
@@ -964,7 +966,7 @@
   };
 
   // ---- actions ----
-  const waitFor = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Date.now() < end) { const v = fn(); if (v) return v; await sleep(80); } return null; };
+  const waitFor = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Date.now() < end) { const v = fn(); if (v) return v; await sleep(25); } return null; };
   const ready = async () => {
     resolveAttempts = 0; lastResolve = 0; // an explicit action always gets a fresh round of lookups
     const ok = await waitFor(() => resolveServices() && controller(), 8000);
@@ -1042,13 +1044,13 @@
       }
       const list = isGroupId(convId) ? cleanMentions(mentions, String(text)) : [];
       await cc._processSendMessage(MSG.TEXT, String(text), list, quoted, true, info, true, null, null);
-      await sleep(50);
+      await sleep(15);
     } catch (e) {
       diag('send failed: ' + scrubErr(e));
       return 'error';
     } finally {
       if (quoteMsgId && !direct) safe(() => cc._quoteBannerData._clear(), null);
-      dirty = true; schedule();
+      dirty = true; flushNow();
     }
     return 'sent';
   };
@@ -1119,6 +1121,16 @@
         if (!MEDIA.loadPC && typeof ex.loadPC === 'function' && String(ex.loadPC).includes('LoadPhotoPC')) MEDIA.loadPC = ex.loadPC;
         if (!MEDIA.files && ex.default && typeof ex.default.fileExists === 'function' && typeof ex.default.getEncodedPathUrl === 'function' && String(ex.default.fileExists).includes('access')) MEDIA.files = ex.default;
         if (!MEDIA.expired && typeof ex.c === 'function' && typeof ex.b === 'function' && String(ex.c).includes('image.min_shelf_life')) MEDIA.expired = ex.c;
+        for (const candidate of [ex, ex.default, ex.a]) {
+          if (candidate && typeof candidate.uploadOptions === 'function' && !candidate.uploadOptions.__olazPatched) {
+            const orig = candidate.uploadOptions;
+            candidate.uploadOptions = function (extData) {
+              if (!extData || typeof extData !== 'object') return null;
+              try { return orig.call(this, extData); } catch (e) { return null; }
+            };
+            candidate.uploadOptions.__olazPatched = true;
+          }
+        }
       } catch {}
     });
     return MEDIA.locator && MEDIA.loadPC && MEDIA.files ? MEDIA : null;
@@ -1132,7 +1144,7 @@
     if (n === 30034 || n === 30063) return 'dns';
     if (n === 30047 || n === 75000 + 5027 || /timeout|tiemout/i.test(String(e.message || ''))) return 'timeout';
     if (n === 30035) return 'offline';
-    if (e.name === 'NotReadyError' || (e.constructor && e.constructor.name === 'NotReadyError')) return 'not-ready';
+    if (e.name === 'NotReadyError' || (e.constructor && e.constructor.name === 'NotReadyError') || /notready|not-ready|not ready/i.test(String((e && (e.name + ' ' + e.message)) || e))) return 'not-ready';
     return 'other';
   };
   // A photo / video listed by the media store (media-store-adapter.js) whose message is not loaded in the chat box: the store's raw item
@@ -1223,17 +1235,35 @@
     const mediaId = `${msg.cliMsgId}.${msg.fromUid}.${msg.toUid}`;
     for (const c of cands) {
       if (!c.localPath) { classes.push('other'); continue; }
-      try {
-        await mods.loadPC({ url: c.url, localPath: c.localPath, msgId: msg.msgId, mediaId, sendDttm: msg.sendDttm, timeout: 25000 });
-        // `loadPC` resolves only after the official downloader reported the file saved at `localPath`.
-        return done('ok', { path: c.localPath, source: 'download', quality: c.type });
-      } catch (e) { classes.push(mediaFailureClass(e)); diag('resolveMedia candidate ' + c.type + ' failed: ' + String((e && (e.name + ':' + e.message)) || e).replace(/https?:\/\/\S+/g, '<url>').slice(0, 80)); }
+      let retries = 0;
+      while (retries < 4) {
+        try {
+          await mods.loadPC({ url: c.url, localPath: c.localPath, msgId: msg.msgId, mediaId, sendDttm: msg.sendDttm, timeout: 25000 });
+          // `loadPC` resolves only after the official downloader reported the file saved at `localPath`.
+          return done('ok', { path: c.localPath, source: 'download', quality: c.type });
+        } catch (e) {
+          const cls = mediaFailureClass(e);
+          if (cls === 'not-ready' && retries < 3) {
+            retries++;
+            diag('resolveMedia candidate ' + c.type + ' not-ready, retrying in ' + (retries * 800) + 'ms');
+            await sleep(retries * 800);
+            if (await mods.files.fileExists(c.localPath)) {
+              return done('ok', { path: c.localPath, source: 'local', quality: c.type });
+            }
+            continue;
+          }
+          classes.push(cls);
+          diag('resolveMedia candidate ' + c.type + ' failed: ' + String((e && (e.name + ':' + e.message)) || e).replace(/https?:\/\/\S+/g, '<url>').slice(0, 80));
+          break;
+        }
+      }
     }
+    const notReady = classes.some((k) => k === 'not-ready');
     const gone = classes.every((k) => k === 'http-404' || k === 'http-410' || k === 'dns');
     const old = safe(() => (mods.expired ? !!mods.expired(msg.sendDttm, msg.toUid || convId) : false), false);
-    const state = gone && old ? 'expired' : 'unavailable';
+    const state = gone && old ? 'expired' : (notReady ? 'not-ready' : 'unavailable');
     diag(`resolveMedia kind=${kind} state=${state} candidates=${cands.length} classes=${Array.from(new Set(classes)).join(',')}`);
-    return done(state, { reason: gone ? 'gone' : (classes[0] || 'other') });
+    return done(state, { reason: notReady ? 'not-ready' : (gone ? 'gone' : (classes[0] || 'other')) });
   };
   const resolveMedia = (convId, msgId, kind) => {
     convId = String(convId); msgId = String(msgId); kind = kind || 'photo';
@@ -1263,21 +1293,22 @@
       track.id = convId; track.exhausted = false; track.noGrowth = 0; track.nameRetries = 0; track.needsNames = false;
       track.lastMessages = null; track.lastList = null; track.sigs = new Map(); track.reactionScan = null; track.serverIds = new Set();
       forceReset = true; dirty = true;
-      schedule();
+      flushNow();
       try {
         const cc = controller();
         if (!cc || cc.convId !== convId || switched) await S.opener.openConversation(convId);
         if (stale()) return;
-        const settled = await waitFor(() => !stale() && convOf(convId) && controller() && controller().convId === convId, 1500);
-        if (!settled && !stale()) repairController(convId, true);
-        else if (settled) noteBoxFields(controller());
+        await waitFor(() => !stale() && convOf(convId), 300);
+        if (stale()) return;
+        if (!controller() || controller().convId !== convId) repairController(convId, true);
+        else noteBoxFields(controller());
         if (stale()) return;
         await S.loader.getLastMessagesForConversation(convId, {});
         if (stale()) { deactivate(convId); return; }
         // The chat view marks its loader active so the official in-memory message cache follows the conversation.
         safe(() => S.loader.cacheMessageLoader.get(convId).active(), null);
       } catch (e) { diag('open ' + (e && e.message || e)); }
-      if (!stale()) { openingId = null; remapAll(); }
+      if (!stale()) { openingId = null; remapAll(); flushNow(); }
     },
     async close(convId) {
       convId = String(convId);

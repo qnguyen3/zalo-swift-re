@@ -10,7 +10,11 @@ BUNDLE_ID="app.olaz.mac"
 # Marketing version and build number; scripts/release.sh sets them for a tagged release.
 VERSION="${OLAZ_VERSION:-1.0}"
 BUILD_NUMBER="${OLAZ_BUILD:-$VERSION}"
-swift build -c "$CONFIG"
+SDK_ARGS=()
+if [[ -d "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk" ]]; then
+    SDK_ARGS=(--sdk "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk")
+fi
+swift build --build-system native "${SDK_ARGS[@]}" -c "$CONFIG"
 BIN=".build/${CONFIG}/Olaz"
 
 # The fingerprint helper (Chromium's TLS/HTTP2 for all requests); its absence is survivable —
@@ -65,16 +69,23 @@ cat > "$APP/Contents/Info.plist" << PLIST
 PLIST
 
 # Sign with the JIT entitlement so JavaScriptCore can JIT the JS modules.
-# The fingerprint helper is its own executable: signed first (hardened runtime, no entitlements),
-# then the app signature seals it.
-# OLAZ_SIGN_IDENTITY="Developer ID Application: ..." (set by scripts/release.sh) signs for distribution:
-# hardened runtime + secure timestamp are what notarization requires. Unset = ad-hoc dev build.
-if [[ -n "${OLAZ_SIGN_IDENTITY:-}" ]]; then
-    if [[ -x "$APP/Contents/MacOS/olaz-fingerprint-helper" ]]; then
-        codesign --force --timestamp --options runtime --sign "$OLAZ_SIGN_IDENTITY" "$APP/Contents/MacOS/olaz-fingerprint-helper"
+# Signing identity: OLAZ_SIGN_IDENTITY, or auto-detect a local certificate (Apple Development, OlazDev),
+# or fall back to ad-hoc signing (`-`).
+SIGN_IDENTITY="${OLAZ_SIGN_IDENTITY:-}"
+if [[ -z "$SIGN_IDENTITY" ]]; then
+    SIGN_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | grep -E 'Apple Development|OlazDev|LocalDev' | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
+fi
+
+if [[ -n "$SIGN_IDENTITY" ]]; then
+    echo "Signing with identity: $SIGN_IDENTITY"
+    SIGN_ARGS=(--force --sign "$SIGN_IDENTITY")
+    if [[ "$SIGN_IDENTITY" == *"Developer ID"* ]]; then
+        SIGN_ARGS=(--force --timestamp --options runtime --sign "$SIGN_IDENTITY")
     fi
-    codesign --force --timestamp --options runtime --sign "$OLAZ_SIGN_IDENTITY" \
-        --entitlements scripts/Olaz.entitlements "$APP"
+    if [[ -x "$APP/Contents/MacOS/olaz-fingerprint-helper" ]]; then
+        codesign "${SIGN_ARGS[@]}" "$APP/Contents/MacOS/olaz-fingerprint-helper"
+    fi
+    codesign "${SIGN_ARGS[@]}" --entitlements scripts/Olaz.entitlements "$APP"
 else
     if [[ -x "$APP/Contents/MacOS/olaz-fingerprint-helper" ]]; then
         codesign --force --sign - "$APP/Contents/MacOS/olaz-fingerprint-helper"

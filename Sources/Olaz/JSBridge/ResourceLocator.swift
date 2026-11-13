@@ -16,7 +16,14 @@ enum ResourceLocator {
         // A resource bundle's files sit at its root (flat) or under Contents/Resources
         // (what the swiftbuild backend emits); `Bundle.resourceURL` resolves both.
         func resources(ofBundleAt url: URL) -> URL? {
-            fm.fileExists(atPath: url.path) ? (Bundle(url: url)?.resourceURL ?? url) : nil
+            guard fm.fileExists(atPath: url.path) else { return nil }
+            // Native SwiftPM emits a flat .bundle without an Info.plist. Foundation may
+            // still report a nested resourceURL for it; prefer the directory actually on disk.
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: url.appendingPathComponent(subdirectory).path, isDirectory: &isDir), isDir.boolValue {
+                return url
+            }
+            return Bundle(url: url)?.resourceURL ?? url
         }
         var candidates: [URL] = []
         if let res = Bundle.main.resourceURL {

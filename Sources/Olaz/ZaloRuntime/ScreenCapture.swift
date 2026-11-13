@@ -40,6 +40,7 @@ final class ScreenCapture {
     /// The conversation of the running capture; nil while idle.
     private var conversationId: String?
     private var hidOlaz = false
+    private var wasActiveBeforeCapture = false
     private var terminationObserver: NSObjectProtocol?
 
     nonisolated static func helperExecutable(appURL: URL = OfficialZaloInstall.defaultAppURL) -> URL {
@@ -79,11 +80,8 @@ final class ScreenCapture {
             return
         }
         self.conversationId = conversationId
-        let request: [String: Any] = [
-            "cmd": "zalo:capture",
-            "data": ["language": "_vn", "enableSend2Me": 1, "enableAccept": 1,
-                     "viMyCloud": "Gửi vào Cloud của tôi", "enMyCloud": "Send to My Cloud"],
-        ]
+        wasActiveBeforeCapture = NSApp.isActive
+        let request = Self.captureRequest(conversationId: conversationId)
         if withOlaz {
             send(request)
         } else {
@@ -97,12 +95,22 @@ final class ScreenCapture {
         }
     }
 
+    /// Capturing from the inbox needs no chat target. Only direct "Gửi" requires one;
+    /// copying, saving, sharing and sending to My Cloud remain available.
+    static func captureRequest(conversationId: String) -> [String: Any] {
+        [
+            "cmd": "zalo:capture",
+            "data": ["language": "_vn", "enableSend2Me": 1, "enableAccept": conversationId.isEmpty ? 0 : 1,
+                     "viMyCloud": "Gửi vào Cloud của tôi", "enMyCloud": "Send to My Cloud"],
+        ]
+    }
+
     func shutdown() {
         process?.terminationHandler = nil
         if process?.isRunning == true { process?.terminate() }
         process = nil
         stdin = nil
-        finish()
+        finish(activate: false)
     }
 
     // MARK: Process
@@ -136,7 +144,7 @@ final class ScreenCapture {
                     self.log("capture: tool exited \(status)")
                     self.process = nil
                     self.stdin = nil
-                    self.finish()
+                    self.finish(activate: self.wasActiveBeforeCapture)
                 }
             }
         }
@@ -216,9 +224,9 @@ final class ScreenCapture {
             finish()
             if !text.isEmpty { onOutcome?(.shareText(text, conversationId: conversation)) }
         case "cap:cancelScrs", "cap:quitAction":
-            finish()
+            finish(activate: wasActiveBeforeCapture)
         case "cap:noPermission":
-            finish()
+            finish(activate: true)
             onOutcome?(.noPermission)
         case "cap:ocrRequest":
             // Main asks its OCR service; there is none here.
@@ -235,7 +243,7 @@ final class ScreenCapture {
     /// The shot the tool left on the clipboard, written as PNG (main: `getClipboardImage().toPNG()`).
     private func deliver(_ outcome: (URL) -> Outcome) {
         let conversation = conversationId ?? ""
-        finish()
+        finish(activate: true)
         guard let png = Self.clipboardPNG(), let url = Self.writeShot(png) else {
             onOutcome?(.failed("Không lấy được ảnh chụp màn hình. Hãy thử lại.", conversationId: conversation))   // STR_TOAST_ERROR
             return
@@ -244,11 +252,11 @@ final class ScreenCapture {
     }
 
     /// Ends the running capture and brings Olaz back (main's restore + `bringOnTop`).
-    private func finish() {
+    private func finish(activate: Bool = true) {
         guard conversationId != nil || hidOlaz else { return }
         conversationId = nil
         if hidOlaz { hidOlaz = false; NSApp.unhide(nil) }
-        NSApp.activate()
+        if activate { NSApp.activate() }
     }
 
     // MARK: Files
@@ -281,7 +289,7 @@ final class ScreenCapture {
         return writeShot(png)
     }
 
-    private static func prune() {
+    static func prune() {
         let fm = FileManager.default
         guard let folders = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.creationDateKey]) else { return }
         let cutoff = Date().addingTimeInterval(-6 * 3600)

@@ -68,8 +68,15 @@ final class ZaloEngine {
         var displayName: String { name.isEmpty ? (isGroup ? "Nhóm" : "Người dùng Zalo") : name }
     }
 
-    private(set) var phase: Phase = .starting
+    private(set) var phase: Phase = .starting {
+        didSet {
+            if phase == .ready || oldValue == .ready {
+                updateScreenshotHotKey()
+            }
+        }
+    }
     private(set) var conversations: [ConversationSummary] = []
+    private(set) var conversationsById: [String: ConversationSummary] = [:]
     /// `conversations` by id: the adapter posts only the rows that changed (`reset` replaces everything).
     @ObservationIgnored private var conversationIndex: [String: ConversationSummary] = [:]
     private(set) var profile: Profile?
@@ -130,6 +137,9 @@ final class ZaloEngine {
     var screenshotShare: ScreenshotShare?
     var screenCaptureNeedsPermission = false
     @ObservationIgnored internal var screenCaptureTool: ScreenCapture?
+    @ObservationIgnored internal var screenshotHotKey: GlobalHotKey?
+    /// Images pasted with ⌘V or accepted from the screenshot tool, staged in the conversation's composer tray.
+    var stagedImages: [String: [StagedImage]] = [:]
     /// Message context-menu actions (ZaloEngine+MessageActions.swift): the "Chia sẻ" picker, a confirm they ask, the undo of the last
     /// "Xóa chỉ ở phía tôi", the pinned list of the open conversation.
     var forwardRequest: ForwardRequest?
@@ -296,6 +306,7 @@ final class ZaloEngine {
         mainProcess?.resetAccountState()
         profile = nil
         conversations = []
+        conversationsById = [:]
         conversationIndex = [:]
         resetConversationActions()
         resetCloud()
@@ -357,6 +368,7 @@ final class ZaloEngine {
         switch state["page"] as? String {
         case "login":
             guard case .login(var login) = phase else { return }
+            let event = state["event"] as? String
             // The official page gave up on this QR (its poller ran out of `qr_retry`): it is no longer watched, so a
             // scan would do nothing. Only from waiting-scan — after an accepted login the page also shows this state.
             if state["invalid"] as? Bool == true, case .waitingScan = login.step {
@@ -366,8 +378,10 @@ final class ZaloEngine {
                 return
             }
             if let qr = state["qr"] as? String, let png = Self.decodeDataURL(qr) {
+                let isDirectQR = event == "qr" || event == "qr2"
+                let qrChanged = login.qrPNG != png
                 login.qrPNG = png
-                switch state["event"] as? String {
+                switch event {
                 case "qr":
                     login.step = .waitingScan
                     login.isSecondQR = false
@@ -376,10 +390,22 @@ final class ZaloEngine {
                     login.step = .waitingScan
                     login.isSecondQR = true
                 default:
-                    break
+                    // Multi-layer login replaces the first QR after a successful scan.
+                    // Its second QR must leave any previous error/expiry state too.
+                    if isDirectQR || login.step == .generating {
+                        login.step = .waitingScan
+                    }
                 }
                 phase = .login(login)
-                scheduleExpiry()
+                if isDirectQR || qrChanged {
+                    scheduleExpiry()
+                }
+            } else if event == nil, state["invalid"] as? Bool == true {
+                if case .waitingScan = login.step {
+                    loginTimeout?.cancel()
+                    login.step = .expired
+                    phase = .login(login)
+                }
             }
         case "main" where state["convActions"] != nil:
             handleConversationActions(state: state)
@@ -442,6 +468,11 @@ final class ZaloEngine {
         if code == Self.secondQRRequiredCode { return }
         if let name = data["display_name"] as? String, !name.isEmpty {
             login.step = .waitingConfirm(name: name, avatar: (data["avatar"] as? String).flatMap(URL.init(string:)))
+            phase = .login(login)
+        } else if code == -20, url.path().hasSuffix("/polling/qr/waiting") {
+            // Official login-startup handles -20 by calling genSecondQR, then waits
+            // for another scan. This is a protocol transition, not a terminal error.
+            login.step = .waitingScan
             phase = .login(login)
         } else if code != 0, let message = json["error_message"] as? String, !message.isEmpty {
             login.step = .failed(message)
@@ -525,6 +556,7 @@ final class ZaloEngine {
         for row in rows { index[row.id] = row }
         guard reset || index != conversationIndex else { return }
         conversationIndex = index
+        conversationsById = index
         let sorted = index.values.sorted(by: Self.listOrder)
         if sorted != conversations { conversations = sorted }
     }
@@ -560,7 +592,7 @@ final class ZaloEngine {
     /// The QR `<img>` source as image bytes. The server's QR is a base64 PNG, but the official renderer draws the
     /// self-generated / trusted-device QRs (`genSecondQR`, and `genFirstQR` in that mode) itself as
     /// `data:image/svg+xml;utf8,<percent-encoded SVG>`; `NSImage(data:)` renders either.
-    static func decodeDataURL(_ url: String) -> Data? {
+    nonisolated static func decodeDataURL(_ url: String) -> Data? {
         guard url.hasPrefix("data:"), let comma = url.firstIndex(of: ",") else { return nil }
         let header = url[..<comma], payload = String(url[url.index(after: comma)...])
         if header.hasSuffix(";base64") { return Data(base64Encoded: payload) }

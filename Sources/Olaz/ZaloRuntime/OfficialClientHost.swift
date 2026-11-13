@@ -51,6 +51,7 @@ final class OfficialClientHost: NSObject {
     var onPageEvent: ((PageEvent) -> Void)?
     /// Files the next open panel of the page is answered with (composer-adapter.js clicks a hidden file input); taken once.
     private var pendingOpenPanel: (id: UUID, urls: [URL])?
+    private var fallbackOpenPanel: (id: UUID, urls: [URL])?
     private var openPanelBusy = false
     private var openPanelWaiters: [CheckedContinuation<Void, Never>] = []
     private var finishedPicks: Set<UUID> = []
@@ -96,6 +97,7 @@ final class OfficialClientHost: NSObject {
         webView.uiDelegate = self
         startPathMonitor()
         schemeHandler.bridge = bridge
+        schemeHandler.host = self
         network.webView = webView
         bridge.webView = webView
     }
@@ -157,6 +159,7 @@ final class OfficialClientHost: NSObject {
         openPanelBusy = true
         let id = UUID()
         pendingOpenPanel = (id, urls)
+        fallbackOpenPanel = (id, urls)
         let run = Task {
             let value = await self.evaluate(script)
             self.finishedPicks.insert(id)
@@ -168,8 +171,20 @@ final class OfficialClientHost: NSObject {
         openPanelBusy = false
         if !openPanelWaiters.isEmpty { openPanelWaiters.removeFirst().resume() }
         let result = await run.value.value
+        if fallbackOpenPanel?.id == id { fallbackOpenPanel = nil }
         finishedPicks.remove(id)
         return result
+    }
+
+    func peekFallbackPick() -> [URL] {
+        pendingOpenPanel = nil
+        return fallbackOpenPanel?.urls ?? []
+    }
+
+    func fallbackPickURL(at index: Int) -> URL? {
+        guard let urls = fallbackOpenPanel?.urls, urls.indices.contains(index) else { return nil }
+        if index == urls.count - 1 { fallbackOpenPanel = nil }
+        return urls[index]
     }
 
     func shutdown() {
@@ -202,6 +217,7 @@ extension OfficialClientHost: WKUIDelegate {
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor ([URL]?) -> Void) {
         let urls = pendingOpenPanel?.urls
         pendingOpenPanel = nil
+        fallbackOpenPanel = nil
         guard let urls, !urls.isEmpty else { completionHandler(nil); return }
         completionHandler(parameters.allowsMultipleSelection ? urls : Array(urls.prefix(1)))
     }
@@ -244,9 +260,11 @@ extension OfficialClientHost: WKNavigationDelegate {
 
 final class AsarSchemeHandler: NSObject, WKURLSchemeHandler {
     static let bridgeSyncPath = "/__olaz/bridge-sync"
+    static let pickPath = "/__olaz/pick"
     let asar: AsarArchive
     let root: String
     weak var bridge: ZaloBridge?
+    weak var host: OfficialClientHost?
 
     init(asar: AsarArchive, root: String) {
         self.asar = asar
@@ -260,6 +278,29 @@ final class AsarSchemeHandler: NSObject, WKURLSchemeHandler {
             let body = task.request.httpBody ?? Data()
             let data = MainActor.assumeIsolated { bridge?.handleSyncRequest(body) } ?? Data("{}".utf8)
             respond(task, url: url, data: data, mime: "application/json")
+            return
+        }
+        if url.path() == Self.pickPath {
+            let urls = MainActor.assumeIsolated { host?.peekFallbackPick() } ?? []
+            let items: [[String: Any]] = urls.enumerated().map { index, fileURL in
+                let mtime = ((try? FileManager.default.attributesOfItem(atPath: fileURL.path))?[.modificationDate] as? Date) ?? Date()
+                return [
+                    "index": index,
+                    "name": fileURL.lastPathComponent,
+                    "path": fileURL.path,
+                    "type": Self.mime(for: fileURL.path),
+                    "lastModified": Int64((mtime.timeIntervalSince1970 * 1000).rounded()),
+                ]
+            }
+            let data = (try? JSONSerialization.data(withJSONObject: items)) ?? Data("[]".utf8)
+            respond(task, url: url, data: data, mime: "application/json")
+            return
+        }
+        if url.path().hasPrefix(Self.pickPath + "/"),
+           let index = Int(url.path().dropFirst(Self.pickPath.count + 1)),
+           let fileURL = MainActor.assumeIsolated({ host?.fallbackPickURL(at: index) }),
+           let data = try? Data(contentsOf: fileURL) {
+            respond(task, url: url, data: data, mime: Self.mime(for: fileURL.path))
             return
         }
         let path = url.path()

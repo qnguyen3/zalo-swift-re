@@ -31,6 +31,7 @@ struct ChatComposer: View {
     @State private var importKind = AttachmentKind.files
     @State private var showMyCard = false
     @State private var reminderInfo: ReminderComposeInfo?
+    @State private var clipboardImages: ClipboardImages?
 
     private enum AttachmentKind { case media, files }
     /// Stickers suggested for the draft (official suggestion logic); they show only while the draft still is the text they were found for.
@@ -42,7 +43,8 @@ struct ChatComposer: View {
         typingStickers.isVisible(draft: draft, mentionListOpen: suggestionsOpen, settingEnabled: StickerSuggestState.shared.setting?.enabled)
     }
 
-    private var isEmpty: Bool { draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var staged: [StagedImage] { engine.stagedImages[conversationId] ?? [] }
+    private var isEmpty: Bool { draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && staged.isEmpty }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -76,6 +78,14 @@ struct ChatComposer: View {
                 .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+            if !staged.isEmpty {
+                StagedImageStrip(
+                    images: staged,
+                    remove: { engine.removeStagedImage($0, in: conversationId) },
+                    clearAll: { engine.clearStagedImages(in: conversationId) }
+                )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
             if suggestionsOpen {
                 MentionSuggestions(candidates: candidates, selected: $selected, pick: pick)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -103,7 +113,9 @@ struct ChatComposer: View {
         .animation(.snappy(duration: 0.18), value: suggestionsOpen)
         .animation(.snappy(duration: 0.18), value: stickerStripOpen)
         .animation(.snappy(duration: 0.18), value: replyTo?.id)
+        .animation(.snappy(duration: 0.18), value: staged.map(\.id))
         .animation(.snappy(duration: 0.18), value: typingName)
+        .onChange(of: staged.count) { old, now in if now > old { handle.focus() } }
         .onAppear { ComposerTextView.accent = NSColor(ChatPalette.accent(accentStored)) }
         .onChange(of: accentStored) { _, now in ComposerTextView.accent = NSColor(ChatPalette.accent(now)) }
         .task(id: query) { await loadCandidates() }
@@ -111,6 +123,7 @@ struct ChatComposer: View {
         .onChange(of: draft) { _, _ in typingStickers.dismissed = false }
         .sheet(isPresented: $showPollCreate) { PollCreateSheet(conversationId: conversationId) }
         .sheet(isPresented: $showMyCard) { MyCardSheet(conversationId: conversationId, conversationName: name) }
+        .sheet(item: $clipboardImages) { ClipboardImageSheet(selection: $0) }
         .sheet(isPresented: Binding(get: { reminderInfo != nil }, set: { if !$0 { reminderInfo = nil } })) {
             if let reminderInfo { ReminderComposeSheet(conversationId: conversationId, info: reminderInfo) }
         }
@@ -166,8 +179,14 @@ struct ChatComposer: View {
             ComposerTextView(
                 text: $draft, mentions: $mentions, height: $textHeight, focusTick: focusTick,
                 handle: handle, mentionsEnabled: isGroup,
+                hasStagedImages: !staged.isEmpty,
                 onMentionQuery: { query = $0 },
                 onSuggestionKey: suggestionKey,
+                onPasteImages: { images in
+                    guard !conversationId.isEmpty else { return }
+                    engine.stageImages(images, in: conversationId)
+                    handle.focus()
+                },
                 onSend: send)
                 .frame(height: textHeight)
                 .overlay(alignment: .topLeading) {
@@ -180,6 +199,8 @@ struct ChatComposer: View {
                     }
                 }
                 .padding(.vertical, 10)
+                .contentShape(Rectangle())
+                .onTapGesture { handle.focus() }
             if !conversationId.isEmpty {
                 Button {
                     showStickers.toggle()
@@ -438,6 +459,15 @@ private struct MentionSuggestions: View {
 final class ComposerHandle {
     weak var textView: NSTextView?
 
+    func focus() {
+        guard let tv = textView else { return }
+        tv.window?.makeFirstResponder(tv)
+        DispatchQueue.main.async { [weak tv] in
+            guard let tv, let window = tv.window, window.attachedSheet == nil else { return }
+            window.makeFirstResponder(tv)
+        }
+    }
+
     func insertMention(_ candidate: MentionCandidate, replacing range: NSRange) {
         guard let tv = textView, let storage = tv.textStorage,
               NSMaxRange(range) <= storage.length,
@@ -478,9 +508,11 @@ struct ComposerTextView: NSViewRepresentable {
     var focusTick: Int
     var handle: ComposerHandle? = nil
     var mentionsEnabled = false
+    var hasStagedImages = false
     var onMentionQuery: (MentionQuery?) -> Void = { _ in }
     /// While the popover is open: ↑ ↓ Return/Tab Esc. Returns true when consumed.
     var onSuggestionKey: (MentionKey) -> Bool = { _ in false }
+    var onPasteImages: (([NSImage]) -> Void)? = nil
     var onSend: () -> Void
 
     static let font = NSFont.systemFont(ofSize: 14)
@@ -532,9 +564,19 @@ struct ComposerTextView: NSViewRepresentable {
         tv.setAccessibilityLabel("Nhập tin nhắn")
         Self.setContent(tv, text: text, mentions: mentions)
         context.coordinator.parent.handle?.textView = tv
+        tv.hasStagedImages = hasStagedImages
         tv.onWidthChange = { [weak coordinator = context.coordinator, weak tv] in
             guard let tv else { return }
             coordinator?.remeasure(tv)
+        }
+        tv.onPasteImages = { [weak coordinator = context.coordinator] images in
+            coordinator?.parent.onPasteImages?(images)
+        }
+        tv.onSuggestionKey = { [weak coordinator = context.coordinator] key in
+            coordinator?.parent.onSuggestionKey(key) ?? false
+        }
+        tv.onSend = { [weak coordinator = context.coordinator] in
+            coordinator?.parent.onSend()
         }
 
         let scroll = NSScrollView()
@@ -551,8 +593,9 @@ struct ComposerTextView: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
-        guard let tv = scroll.documentView as? NSTextView else { return }
+        guard let tv = scroll.documentView as? FieldTextView else { return }
         handle?.textView = tv
+        tv.hasStagedImages = hasStagedImages
         if tv.string != text, tv.hasMarkedText() {
             // IME composition in progress: keep the external text until it is committed (`textDidChange`).
             context.coordinator.deferExternal(base: tv.string, text: text, mentions: mentions)
@@ -711,25 +754,34 @@ struct ComposerTextView: NSViewRepresentable {
         private var lastQuery: MentionQuery?
 
         func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            let isReturn = selector == #selector(NSResponder.insertNewline(_:))
+                || selector == #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:))
+                || selector == #selector(NSResponder.insertLineBreak(_:))
             switch selector {
             case #selector(NSResponder.moveUp(_:)): if parent.onSuggestionKey(.up) { return true }
             case #selector(NSResponder.moveDown(_:)): if parent.onSuggestionKey(.down) { return true }
             case #selector(NSResponder.insertTab(_:)): if parent.onSuggestionKey(.confirm) { return true }
             case #selector(NSResponder.cancelOperation(_:)): if parent.onSuggestionKey(.cancel) { return true }
-            case #selector(NSResponder.insertNewline(_:)):
-                let mods = NSApp.currentEvent?.modifierFlags ?? []
-                if !mods.contains(.shift), !mods.contains(.option), !textView.hasMarkedText(),
-                   parent.onSuggestionKey(.confirm) { return true }
-            default: break
+            default:
+                if isReturn {
+                    let mods = NSApp.currentEvent?.modifierFlags ?? []
+                    if !mods.contains(.shift), !mods.contains(.option), !textView.hasMarkedText(),
+                       parent.onSuggestionKey(.confirm) { return true }
+                }
             }
-            guard selector == #selector(NSResponder.insertNewline(_:)) else { return false }
+            guard isReturn else { return false }
             let mods = NSApp.currentEvent?.modifierFlags ?? []
             if mods.contains(.shift) || mods.contains(.option) {
                 textView.insertNewlineIgnoringFieldEditor(nil)
                 return true
             }
-            // Return confirming IME composition never reaches here, but be defensive.
-            if textView.hasMarkedText() { return false }
+            // Return confirming IME composition never reaches here, unless staged images are ready to send.
+            if textView.hasMarkedText() {
+                guard parent.hasStagedImages else { return false }
+                textView.inputContext?.discardMarkedText()
+                textView.unmarkText()
+                textDidChange(Notification(name: NSText.didChangeNotification, object: textView))
+            }
             parent.onSend()
             return true
         }
@@ -748,6 +800,139 @@ struct ComposerTextView: NSViewRepresentable {
 
     final class FieldTextView: NSTextView {
         var onWidthChange: (() -> Void)?
+        var onPasteImages: (([NSImage]) -> Void)?
+        var onSuggestionKey: ((MentionKey) -> Bool)?
+        var onSend: (() -> Void)?
+        var hasStagedImages = false
+        private var keyMonitor: Any?
+        // Injectable so tests never overwrite the user's clipboard.
+        var pasteboard = NSPasteboard.general
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let keyMonitor {
+                NSEvent.removeMonitor(keyMonitor)
+                self.keyMonitor = nil
+            }
+            guard let window else { return }
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                let consumed = MainActor.assumeIsolated { self?.handleWindowKeyDown(event) ?? false }
+                return consumed ? nil : event
+            }
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self, let window, self.window === window else { return }
+                if !(window.firstResponder is NSTextView) {
+                    window.makeFirstResponder(self)
+                }
+            }
+        }
+
+        override func keyDown(with event: NSEvent) {
+            let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            if (event.keyCode == 36 || event.keyCode == 76), flags.isEmpty {
+                if !hasMarkedText() {
+                    if onSuggestionKey?(.confirm) == true { return }
+                    onSend?()
+                    return
+                } else if hasStagedImages {
+                    inputContext?.discardMarkedText()
+                    unmarkText()
+                    delegate?.textDidChange?(Notification(name: NSText.didChangeNotification, object: self))
+                    if onSuggestionKey?(.confirm) == true { return }
+                    onSend?()
+                    return
+                }
+            }
+            super.keyDown(with: event)
+        }
+
+        private func handleWindowKeyDown(_ event: NSEvent) -> Bool {
+            guard isEditable,
+                  !isHiddenOrHasHiddenAncestor,
+                  let window = self.window,
+                  event.window === window,
+                  window.attachedSheet == nil else {
+                return false
+            }
+            if let other = window.firstResponder as? NSTextView, other !== self, other.isEditable {
+                return false
+            }
+            let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            guard (event.keyCode == 36 || event.keyCode == 76), flags.isEmpty else {
+                return false
+            }
+            if window.firstResponder === self {
+                if !hasMarkedText() {
+                    if onSuggestionKey?(.confirm) == true { return true }
+                    onSend?()
+                    return true
+                } else if hasStagedImages {
+                    inputContext?.discardMarkedText()
+                    unmarkText()
+                    delegate?.textDidChange?(Notification(name: NSText.didChangeNotification, object: self))
+                    if onSuggestionKey?(.confirm) == true { return true }
+                    onSend?()
+                    return true
+                }
+                return false
+            }
+            if hasStagedImages || !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                window.makeFirstResponder(self)
+                if onSuggestionKey?(.confirm) == true { return true }
+                onSend?()
+                return true
+            }
+            return false
+        }
+
+        override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            if event.type == .keyDown, flags == .command, event.charactersIgnoringModifiers?.lowercased() == "v",
+               isEditable, let window, window.attachedSheet == nil {
+                if window.firstResponder === self {
+                    paste(nil)
+                    return true
+                }
+                if !(window.firstResponder is NSTextView) {
+                    if consumeImages(from: pasteboard) {
+                        window.makeFirstResponder(self)
+                        return true
+                    }
+                    if pasteboard.string(forType: .string) != nil {
+                        window.makeFirstResponder(self)
+                        super.paste(nil)
+                        return true
+                    }
+                }
+            }
+            return super.performKeyEquivalent(with: event)
+        }
+
+        override func paste(_ sender: Any?) {
+            if consumeImages(from: pasteboard) { return }
+            super.paste(sender)
+        }
+
+        override func readSelection(from pboard: NSPasteboard) -> Bool {
+            if consumeImages(from: pboard) { return true }
+            return super.readSelection(from: pboard)
+        }
+
+        override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+            if item.action == #selector(paste(_:)), isEditable, onPasteImages != nil,
+               !ClipboardImages.read(from: pasteboard).isEmpty { return true }
+            return super.validateUserInterfaceItem(item)
+        }
+
+        private func consumeImages(from board: NSPasteboard) -> Bool {
+            guard isEditable, let onPasteImages else { return false }
+            let images = ClipboardImages.read(from: board)
+            guard !images.isEmpty else { return false }
+            hasStagedImages = true
+            onPasteImages(images)
+            return true
+        }
+
         override func setFrameSize(_ newSize: NSSize) {
             let changed = abs(newSize.width - frame.width) > 0.5
             super.setFrameSize(newSize)

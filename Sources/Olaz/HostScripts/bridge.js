@@ -167,7 +167,7 @@
       get(target, prop) {
         if (typeof prop === 'symbol') return target[prop];
         if (prop === 'then' || prop === 'toJSON' || prop === 'prototype') return undefined;
-        if (prop === 'bind' || prop === 'call' || prop === 'apply') return Function.prototype[prop].bind(target);
+        if (prop === 'bind' || prop === 'call' || prop === 'apply' || prop === 'toString' || prop === 'valueOf') return Function.prototype[prop].bind(target);
         return resolve(path + '.' + prop);
       },
       has() { return true; },

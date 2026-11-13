@@ -196,15 +196,42 @@ struct ChatView: View {
 
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        let staged = engine.takeStagedImages(for: id)
+        guard !text.isEmpty || !staged.isEmpty else { return }
         // Untrimmed draft: the engine re-bases mention offsets when it trims.
         let (sentDraft, sentMentions, sentReply) = (draft, draftMentions, replyTo)
         draft = ""
         draftMentions = []
         replyTo = nil
         sendTick += 1
-        let (engine, id) = (engine, id)
+        let (engine, id, displayName) = (engine, id, conversation.displayName)
+        EngineLog.shared.write("chat send text=\(!text.isEmpty) staged=\(staged.count)")
         Task {
+            if !staged.isEmpty {
+                let singlePhotoCaption = staged.count == 1 && !text.isEmpty && sentMentions.isEmpty && sentReply == nil
+                do {
+                    let pick = try ClipboardImages(conversationId: id, conversationName: displayName, images: staged.map(\.image)).writeFiles()
+                    let outcome = await engine.sendMedia(pick.files, to: id, caption: singlePhotoCaption ? sentDraft : nil)
+                    switch outcome {
+                    case .done, .pending:
+                        break
+                    case .failed, .cancelled:
+                        engine.restoreStagedImages(staged, in: id)
+                        if singlePhotoCaption {
+                            engine.failedDrafts.stash(ComposerDraft(text: sentDraft, mentions: sentMentions, replyTo: sentReply), for: id, silent: true)
+                        }
+                    }
+                    engine.report(outcome, in: id)
+                } catch {
+                    engine.restoreStagedImages(staged, in: id)
+                    if singlePhotoCaption {
+                        engine.failedDrafts.stash(ComposerDraft(text: sentDraft, mentions: sentMentions, replyTo: sentReply), for: id, silent: true)
+                    }
+                    CardActionCenter.shared.show("Không đọc được ảnh đính kèm. Hãy thử lại.", in: id)
+                    return
+                }
+                if singlePhotoCaption || text.isEmpty { return }
+            }
             guard await !engine.sendText(sentDraft, to: id, quoting: sentReply?.id, mentions: sentMentions) else { return }
             // Nothing was sent. The view may be gone by now (conversation switched): the engine keeps the text and the
             // composer shown for this conversation takes it back (`restoreFailedDraft`).
@@ -254,6 +281,7 @@ struct ChatRow: Identifiable {
 private final class RowCache {
     private var source: [ChatMessage] = []
     private var rows: [ChatRow] = []
+    var lastContentHeight: CGFloat = 0
 
     func rows(for msgs: [ChatMessage]) -> [ChatRow] {
         if msgs == source { return rows }
@@ -302,7 +330,6 @@ private struct MessageList: View {
     @State private var cache = RowCache()
     @State private var atTop = false
     @State private var nearBottom = true
-    @State private var lastContentHeight: CGFloat = 0
     @State private var loadingOlder = false
     @State private var olderTask: Task<Void, Never>?
     @State private var topId: String?
@@ -314,10 +341,10 @@ private struct MessageList: View {
     private var id: String { conversation.id }
 
     private struct Metrics: Equatable {
-        var top: CGFloat
-        var fromBottom: CGFloat
-        var content: CGFloat
-        var visible: CGFloat
+        var atTopBand: Bool
+        var nearBottomBand: Bool
+        var shortContent: Bool
+        var contentHeight: Int
     }
 
     var body: some View {
@@ -355,21 +382,23 @@ private struct MessageList: View {
             .scrollEdgeEffectStyle(.hard, for: .top)
             .scrollEdgeEffectStyle(.soft, for: .bottom)
             .onScrollGeometryChange(for: Metrics.self) { geo in
-                Metrics(top: geo.contentOffset.y + geo.contentInsets.top,
-                        fromBottom: geo.contentSize.height - geo.visibleRect.maxY,
-                        content: geo.contentSize.height,
-                        visible: geo.visibleRect.height)
+                let topOffset = geo.contentOffset.y + geo.contentInsets.top
+                let fromBottom = geo.contentSize.height - geo.visibleRect.maxY
+                return Metrics(atTopBand: topOffset < 120,
+                               nearBottomBand: fromBottom < 160,
+                               shortContent: geo.contentSize.height - geo.visibleRect.height < 120,
+                               contentHeight: Int(geo.contentSize.height.rounded()))
             } action: { _, m in
-                let top = m.top < 120
+                let top = m.atTopBand
                 // Re-armed once the reader is away from the top, or when the history is too short to ever leave the top band.
-                if !olderArmed, !top || m.content - m.visible < 120 { olderArmed = true }
+                if !olderArmed, !top || m.shortContent { olderArmed = true }
                 if top != atTop { atTop = top }
                 // Only user scrolling (not content growth) changes "near bottom".
-                if abs(m.content - lastContentHeight) < 1 {
-                    let near = m.fromBottom < 160
-                    if near != nearBottom { nearBottom = near }
+                let content = CGFloat(m.contentHeight)
+                if abs(content - cache.lastContentHeight) <= 1 {
+                    if m.nearBottomBand != nearBottom { nearBottom = m.nearBottomBand }
                 }
-                lastContentHeight = m.content
+                cache.lastContentHeight = content
             }
             .onChange(of: atTop) { _, _ in maybeLoadOlder(hasMore: hasMore, count: msgs.count) }
             .onChange(of: olderArmed) { _, _ in maybeLoadOlder(hasMore: hasMore, count: msgs.count) }

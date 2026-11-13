@@ -77,9 +77,16 @@ final class TourAnchorRegistry {
     func isOnScreen(_ step: TourStep) -> Bool { live[step]?.isEmpty == false }
 }
 
+private struct TourAnchorsKey: EnvironmentKey {
+    nonisolated(unsafe) static let defaultValue: TourAnchorRegistry? = nil
+}
+
 extension EnvironmentValues {
     /// Set by `tourCoordinator()`; nil outside the signed-in window, where anchors present their coach mark directly.
-    @Entry var tourAnchors: TourAnchorRegistry? = nil
+    var tourAnchors: TourAnchorRegistry? {
+        get { self[TourAnchorsKey.self] }
+        set { self[TourAnchorsKey.self] = newValue }
+    }
 }
 
 private struct TourAnchorModifier: ViewModifier {

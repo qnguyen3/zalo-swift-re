@@ -330,7 +330,7 @@ final class CloudThumbnails {
         if Task.isCancelled { return .missing }
         switch resolution {
         case .expired: return .expired
-        case .unavailable, .unsupported: return .missing
+        case .unavailable, .unsupported, .notReady: return .missing
         case .file(let url):
             var image: NSImage?
             if item.kind == .video { image = await Self.videoFrame(url, name: item.id) }

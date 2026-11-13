@@ -5,6 +5,18 @@ import Foundation
 /// The ZaloCap stdout framing (main.js "F58p"), composer outcome decoding and the reminder sheet's time chips.
 @MainActor
 struct ComposerTests {
+    @Test func captureWithoutChatKeepsCloudButDisablesDirectSend() throws {
+        let inbox = ScreenCapture.captureRequest(conversationId: "")
+        let chat = ScreenCapture.captureRequest(conversationId: "c1")
+        #expect(inbox["cmd"] as? String == "zalo:capture")
+        let inboxOptions = try #require(inbox["data"] as? [String: Any])
+        let chatOptions = try #require(chat["data"] as? [String: Any])
+        #expect(inboxOptions["enableAccept"] as? Int == 0)
+        #expect(chatOptions["enableAccept"] as? Int == 1)
+        #expect(inboxOptions["enableSend2Me"] as? Int == 1)
+        #expect(chatOptions["enableSend2Me"] as? Int == 1)
+    }
+
     @Test func framesAreCutOutOfLogNoise() {
         var buffer = "\" 2026/10/27 - 08:15:09:198 | MainWindow::connectEvents\"\nSUCCESS_INIT\n"
             + #"@cap_resp@{"id":7,"data":"{\"cmd\":\"cap:recvReq\",\"data\":\"zalo:capture\"}"}@end_cap_resp@"#

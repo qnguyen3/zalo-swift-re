@@ -61,6 +61,14 @@ struct ScreenshotShare: Identifiable, Equatable {
     var conversationId: String
 }
 
+/// An image staged in the chat composer's inline preview tray (from ⌘V paste or the screenshot tool).
+struct StagedImage: Identifiable, Equatable {
+    let id = UUID()
+    let image: NSImage
+
+    static func == (lhs: StagedImage, rhs: StagedImage) -> Bool { lhs.id == rhs.id }
+}
+
 /// My own contact card as the official "Gửi danh thiếp" modal would send it.
 struct MyCardInfo: Equatable {
     var uid: String
@@ -130,9 +138,13 @@ enum ReminderRepeat: Int, CaseIterable, Identifiable {
 extension ZaloEngine {
     // MARK: Attachments
 
+    static let maxStagedImages = 50
+
     /// "Ảnh hoặc Video": photos through the official photo button's path, videos and other files as files.
-    func sendMedia(_ urls: [URL], to id: String) async -> ComposerOutcome {
-        await composeWithFiles("sendMedia", [id], files: urls)
+    func sendMedia(_ urls: [URL], to id: String, caption: String? = nil) async -> ComposerOutcome {
+        let trimmed = caption?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let args: [Any] = trimmed.isEmpty ? [id] : [id, trimmed]
+        return await composeWithFiles("sendMedia", args, files: urls)
     }
 
     /// "Tệp": the official file button's path.
@@ -140,7 +152,73 @@ extension ZaloEngine {
         await composeWithFiles("sendFiles", [id], files: urls)
     }
 
+    func stageImages(_ images: [NSImage], in id: String) {
+        guard !id.isEmpty, !images.isEmpty else { return }
+        var current = stagedImages[id] ?? []
+        let remaining = max(0, Self.maxStagedImages - current.count)
+        guard remaining > 0 else {
+            CardActionCenter.shared.show("Chỉ gửi được tối đa \(Self.maxStagedImages) ảnh mỗi lần.", in: id)
+            return
+        }
+        current.append(contentsOf: images.prefix(remaining).map { StagedImage(image: $0) })
+        stagedImages[id] = current
+    }
+
+    func removeStagedImage(_ itemId: UUID, in id: String) {
+        guard var current = stagedImages[id] else { return }
+        current.removeAll { $0.id == itemId }
+        stagedImages[id] = current.isEmpty ? nil : current
+    }
+
+    func clearStagedImages(in id: String) {
+        stagedImages[id] = nil
+    }
+
+    func takeStagedImages(for id: String) -> [StagedImage] {
+        stagedImages.removeValue(forKey: id) ?? []
+    }
+
+    func restoreStagedImages(_ items: [StagedImage], in id: String) {
+        guard !id.isEmpty, !items.isEmpty else { return }
+        let existing = stagedImages[id] ?? []
+        stagedImages[id] = Array((items + existing).prefix(Self.maxStagedImages))
+    }
+
     // MARK: Screenshot
+
+    /// System-wide screenshot hotkey setting (defaults to true).
+    static var isGlobalScreenshotEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: OlazPrefs.globalScreenshot) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: OlazPrefs.globalScreenshot) }
+    }
+
+    /// Registers or unregisters the global ⌥⌘S hotkey based on ready phase and user preference.
+    func updateScreenshotHotKey() {
+        if phase == .ready && Self.isGlobalScreenshotEnabled {
+            if screenshotHotKey == nil {
+                let hotKey = GlobalHotKey { [weak self] in
+                    self?.triggerGlobalScreenshot()
+                }
+                if hotKey.register() {
+                    screenshotHotKey = hotKey
+                    EngineLog.shared.write("screenshot: global hotkey registered (⌘⌥S)")
+                }
+            }
+        } else {
+            if let hotKey = screenshotHotKey {
+                hotKey.unregister()
+                screenshotHotKey = nil
+                EngineLog.shared.write("screenshot: global hotkey unregistered")
+            }
+        }
+    }
+
+    /// Triggered globally via ⌥⌘S, regardless of which application currently has focus.
+    func triggerGlobalScreenshot() {
+        guard phase == .ready else { return }
+        let id = openConversationId.flatMap { isConversationLocked($0) ? nil : $0 } ?? ""
+        startScreenCapture(in: id, withOlaz: true)
+    }
 
     /// Starts the official screenshot tool for the conversation `id`; the result arrives through `handleCapture`.
     func startScreenCapture(in id: String, withOlaz: Bool) {
@@ -168,11 +246,18 @@ extension ZaloEngine {
 
     private func handleCapture(_ outcome: ScreenCapture.Outcome) {
         switch outcome {
-        case .send(let url, let id), .sendToMe(let url, let id):
-            var toMe = false
-            if case .sendToMe = outcome { toMe = true }
+        case .send(let url, let id):
+            if !id.isEmpty, let image = NSImage(contentsOf: url) {
+                stageImages([image], in: id)
+                return
+            }
             Task {
-                let result = await composeWithFiles("sendShot", [id, toMe], files: [url])
+                let result = await composeWithFiles("sendShot", [id, false], files: [url])
+                report(result, in: id)
+            }
+        case .sendToMe(let url, let id):
+            Task {
+                let result = await composeWithFiles("sendShot", [id, true], files: [url])
                 report(result, in: id)
             }
         case .share(let url, let id):
@@ -254,6 +339,7 @@ extension ZaloEngine {
         dropComposerConfirms()
         screenshotShare = nil
         screenCaptureNeedsPermission = false
+        stagedImages = [:]
     }
 
     /// Shows a failure or pending text for a composer action as the conversation's toast.

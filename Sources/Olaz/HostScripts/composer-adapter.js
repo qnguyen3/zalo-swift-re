@@ -99,6 +99,14 @@
         if (!M.modal && ex.ModalManagerV2 && has(ex.ModalManagerV2, 'openModal', 'closeModal')) M.modal = ex.ModalManagerV2;
         for (const o of [ex, ex.default, ex.a]) {
           if (!real(o) || (typeof o !== 'object' && typeof o !== 'function')) continue;
+          if (typeof o.uploadOptions === 'function' && !o.uploadOptions.__olazPatched) {
+            const orig = o.uploadOptions;
+            o.uploadOptions = function (extData) {
+              if (!extData || typeof extData !== 'object') return null;
+              try { return orig.call(this, extData); } catch (e) { return null; }
+            };
+            o.uploadOptions.__olazPatched = true;
+          }
           if (!M.lang && has(o, 'str', 'trans', 'currentLanguage')) M.lang = o;
           if (!M.toast && has(o, 'createError', 'createMessagev2', 'createMessageCustom', '_createDom')) M.toast = o;
           if (!M.utils && has(o, 'isValidFileName', 'isEnableUpEecx', 'getExtension')) M.utils = o;
@@ -239,7 +247,8 @@
   };
 
   // ---- the files Swift picked: a hidden file input whose open panel Swift answers ----
-  // Must run synchronously inside the call Swift makes (its user gesture); resolves [] when nothing came back.
+  // Must run synchronously inside the call Swift makes (its user gesture); when WebKit blocks `input.click()` in the
+  // offscreen WKWebView (no transient user activation), falls back after 40ms to `/__olaz/pick` served by `AsarSchemeHandler`.
   const pickFiles = () => {
     const input = document.createElement('input');
     input.type = 'file';
@@ -249,13 +258,64 @@
     (document.body || document.documentElement).appendChild(input);
     const picked = new Promise((resolve) => {
       let done = false;
-      const finish = () => { if (done) return; done = true; const list = Array.from(input.files || []); input.remove(); resolve(list); };
-      input.addEventListener('change', finish);
-      input.addEventListener('cancel', finish);
-      setTimeout(finish, 20000);
+      const finish = (files) => {
+        if (done) return;
+        done = true;
+        const list = Array.isArray(files) ? files : Array.from(input.files || []);
+        input.remove();
+        resolve(list);
+      };
+      input.addEventListener('change', () => finish());
+      input.addEventListener('cancel', () => finish());
+      setTimeout(async () => {
+        if (done) return;
+        try {
+          const res = await fetch('/__olaz/pick');
+          if (res.ok) {
+            const items = await res.json();
+            if (Array.isArray(items) && items.length) {
+              const out = [];
+              for (const it of items) {
+                const r = await fetch('/__olaz/pick/' + it.index);
+                if (!r.ok) continue;
+                const blob = await r.blob();
+                const file = new File([blob], it.name, {
+                  type: it.type || blob.type || 'application/octet-stream',
+                  lastModified: it.lastModified || Date.now(),
+                });
+                out.push(file);
+              }
+              diag(`pick fallback files=${out.length}`);
+              finish(out);
+              return;
+            }
+          }
+        } catch (e) { diag('pick fallback ' + scrubErr(e)); }
+        finish([]);
+      }, 40);
     });
     try { input.click(); } catch (e) { diag('pick ' + scrubErr(e)); }
     return picked;
+  };
+
+  // The photo processor encodes uploads to JXL. On macOS >= `jxl.osx_native_target` it takes the native route, a CrossEnvTask to
+  // Electron's utility process that this host does not have: the task is queued and never answers, so the photo never leaves
+  // `process()` (the single-slot JXL bucket stays taken too). The official code falls back to its WASM codec when the native
+  // route *fails*, so the utility-process tasks are made to fail at once.
+  let jxlPatched = false;
+  const failJxlNativeTasks = () => {
+    if (jxlPatched) return;
+    const req = window.__zaloRequire;
+    if (typeof req !== 'function') return;
+    safe(() => {
+      const lib = req('rJMU');
+      for (const k of ['EncodeJxlTask', 'DecodeJxlTask', 'DecodeJxlSingleTask', 'GetJxlInfoTask', 'ResizeJxlTask']) {
+        const C = lib[k];
+        if (C && C.prototype) C.prototype.run = () => Promise.reject(new Error('no utility process'));
+      }
+      jxlPatched = true;
+      diag('jxl native tasks → wasm fallback');
+    }, null);
   };
 
   const extOf = (name) => { const s = str(name); const i = s.lastIndexOf('.'); return i < 0 ? '' : s.slice(i + 1).toLowerCase(); };
@@ -282,14 +342,16 @@
   };
 
   const sendFiles = (convId) => {
+    failJxlNativeTasks();
     const picked = pickFiles();
     convId = String(convId);
     return withScope(convId, async () => {
       const files = await picked;
       if (!files.length) return { status: 'cancelled' };
-      const box = await boxOrStatus(convId, true);
+      const box = await boxOrStatus(convId, false);
       if (box.status) return box;
       if (locked(convId)) return { status: 'locked', text: LOCKED_TEXT };
+      box.cc.mouseOverChatInput = false;
       uploadAsFiles(box, files);
       diag(`files ${files.length}`);
       return { status: 'done' };
@@ -297,20 +359,42 @@
   };
 
   // Photos the official photo button takes (`supportPhoto`) go its way; videos and anything else go as files, as on Zalo PC.
-  const sendMedia = (convId) => {
+  const sendMedia = (convId, caption) => {
+    failJxlNativeTasks();
     const picked = pickFiles();
     convId = String(convId);
+    const title = str(caption).trim();
     return withScope(convId, async () => {
       const files = await picked;
       if (!files.length) return { status: 'cancelled' };
-      const box = await boxOrStatus(convId, true);
+      const box = await boxOrStatus(convId, false);
       if (box.status) return box;
       if (locked(convId)) return { status: 'locked', text: LOCKED_TEXT };
       if (files.length > maxFiles()) { box.cc._notifySendTooManyFile(); return { status: 'invalid' }; }
+      box.cc.mouseOverChatInput = false;
       const exts = photoExts();
       const photos = files.filter((f) => exts.includes(extOf(f.name)));
       const others = files.filter((f) => !photos.includes(f));
-      if (photos.length) await box.cc._uploadImg({ target: { files: photos, value: '' } }, Object.assign({}, box.info), SRC().Photo.CLICK_ICON_SEND_PHOTO, false);
+      if (photos.length) {
+        const targetConv = Object.assign({}, box.info);
+        for (let i = 0; i < photos.length; i++) {
+          const photo = photos[i];
+          const opts = {
+            isPasted: false,
+            isUploaded: true,
+            withoutPreview: true,
+            targetConv,
+            sendSource: SRC().Photo.CLICK_ICON_SEND_PHOTO
+          };
+          if (photos.length === 1 && title) opts.title = title;
+          try {
+            await box.cc._uploadDragPhoto(photo, opts);
+          } catch (e) {
+            if (!e || !e.code) throw e;
+            safe(() => M.overlimit && M.overlimit.b({ [e.code]: [photo] }, box.cc.windowId, box.cc._sendOverlimitPhoto.bind(box.cc, targetConv)), null);
+          }
+        }
+      }
       if (others.length) uploadAsFiles(box, others);
       diag(`media photos=${photos.length} files=${others.length}`);
       return { status: 'done' };
@@ -331,6 +415,7 @@
     }
   };
   const sendShot = (convId, toMe) => {
+    failJxlNativeTasks();
     const picked = pickFiles();
     convId = String(convId);
     return withScope(convId, async () => {
@@ -348,6 +433,7 @@
   };
   // "Chia sẻ": the shot to each chosen conversation (`handleForwardScreenCap` callback: `sendPhotoMessage(blob, {targetConv})`).
   const shareShot = (convIds) => {
+    failJxlNativeTasks();
     const picked = pickFiles();
     const ids = (Array.isArray(convIds) ? convIds : []).map(String).filter(Boolean);
     return withScope(ids[0] || '', async () => {

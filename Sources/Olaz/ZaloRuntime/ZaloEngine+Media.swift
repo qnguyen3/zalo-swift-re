@@ -9,6 +9,8 @@ enum MediaResolution: Equatable, Sendable {
     case file(URL)
     /// Every source is gone and the message is past the official shelf life (Zalo shows "expired").
     case expired
+    /// Media is still uploading or processing on CDN; retry shortly.
+    case notReady
     /// Could not be loaded now (offline, server error, not synced…); worth a retry.
     case unavailable
     /// This kind of media is not resolved through the official image loader.
@@ -20,7 +22,10 @@ enum MediaResolution: Equatable, Sendable {
         case "ok":
             if let path = dict["path"] as? String, path.hasPrefix("/") { self = .file(URL(fileURLWithPath: path)) } else { self = .unavailable }
         case "expired": self = .expired
+        case "not-ready": self = .notReady
         case "unsupported": self = .unsupported
+        case "unavailable":
+            if dict["reason"] as? String == "not-ready" { self = .notReady } else { self = .unavailable }
         default: self = .unavailable
         }
     }
@@ -95,6 +100,7 @@ final class MediaResolver {
         if flights[key] === flight { flights[key] = nil }
         switch resolution {
         case .unavailable: settled[key] = (resolution, Date().addingTimeInterval(Self.unavailableTTL))
+        case .notReady: break
         case .file, .expired, .unsupported: settled[key] = (resolution, .distantFuture)
         }
         if settled.count > 2000 { settled = settled.filter { $0.value.until > Date() } }
@@ -169,6 +175,7 @@ extension MediaResolution {
         switch self {
         case .file: "file"
         case .expired: "expired"
+        case .notReady: "not-ready"
         case .unavailable: "unavailable"
         case .unsupported: "unsupported"
         }

@@ -213,7 +213,7 @@ struct ConversationDetail: View {
 
     static func summary(for conversationId: String?, engine: ZaloEngine) -> ZaloEngine.ConversationSummary? {
         guard let id = conversationId else { return nil }
-        if var known = engine.conversations.first(where: { $0.id == id }) {
+        if var known = engine.conversationsById[id] {
             // The official record names My Documents in English; the list, chat and inspector all say "Cloud của tôi".
             if id == engine.selfConversationId { known.name = "Cloud của tôi" }
             return known

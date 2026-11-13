@@ -159,6 +159,12 @@ struct RemoteImage<Placeholder: View>: View {
                     withAnimation(.easeOut(duration: 0.18)) { image = local.image; isAnimated = false }
                     return
                 }
+            case .notReady:
+                try? await Task.sleep(for: .milliseconds(1200))
+                if !Task.isCancelled {
+                    attempt += 1
+                    return
+                }
             case .expired: reason = .expired
             case .unavailable, .unsupported: break
             }

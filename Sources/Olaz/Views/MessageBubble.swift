@@ -346,8 +346,44 @@ struct MessageRow: View {
                 if let text = message.copyableText {
                     Button("Copy tin nhắn", systemImage: "doc.on.doc") { engine.copyText(text, in: message.conversationId) }
                 }
-                if case .photo = message.kind {
+                if case .photo(let url, _, _) = message.kind {
+                    Button("Hiển thị trong Finder", systemImage: "folder") {
+                        Task { await ChatFiles.showPhotoInFinder(url: url, conversationId: message.conversationId, messageId: message.id, date: message.date, engine: engine) }
+                    }
+                    Button("Lưu ảnh về máy…", systemImage: "square.and.arrow.down") {
+                        Task { await ChatFiles.savePhotoAs(url: url, conversationId: message.conversationId, messageId: message.id, date: message.date, engine: engine) }
+                    }
                     Button("Copy hình ảnh", systemImage: "photo.on.rectangle") { engine.copyPhoto(message) }
+                }
+                if case .video(_, _, let url) = message.kind {
+                    Button("Hiển thị trong Finder", systemImage: "folder") {
+                        Task { await ChatFiles.showVideoInFinder(url: url, conversationId: message.conversationId, messageId: message.id, date: message.date, engine: engine) }
+                    }
+                    Button("Lưu video về máy…", systemImage: "square.and.arrow.down") {
+                        Task { await ChatFiles.saveVideoAs(url: url, conversationId: message.conversationId, messageId: message.id, date: message.date, engine: engine) }
+                    }
+                }
+                if case .voice(let url, _) = message.kind, let url {
+                    Button("Hiển thị trong Finder", systemImage: "folder") {
+                        Task { await ChatFiles.showVoiceInFinder(url: url, date: message.date) }
+                    }
+                    Button("Lưu âm thanh về máy…", systemImage: "square.and.arrow.down") {
+                        Task { await ChatFiles.saveVoiceAs(url: url, date: message.date) }
+                    }
+                }
+                if case .file(let name, _, let url) = message.kind, let url {
+                    Button("Mở tệp", systemImage: "arrow.up.right.square") {
+                        Task { _ = await ChatFiles.open(url: url, displayName: name) }
+                    }
+                    Button("Hiển thị trong Finder", systemImage: "folder") {
+                        Task { _ = await ChatFiles.showInFinder(url: url, displayName: name) }
+                    }
+                    Button("Lưu thành…", systemImage: "square.and.arrow.down") {
+                        Task { await ChatFiles.saveAs(url: url, displayName: name) }
+                    }
+                    Button("Copy tệp", systemImage: "doc.on.doc") {
+                        Task { await ChatFiles.copyFile(url: url, displayName: name) }
+                    }
                 }
                 if let caption = message.caption {
                     Button("Copy chú thích", systemImage: "text.quote") { engine.copyText(caption, in: message.conversationId) }
@@ -400,7 +436,7 @@ struct MessageRow: View {
             VStack(alignment: mine ? .trailing : .leading, spacing: 4) {
                 PhotoView(url: url, width: w, height: h, conversationId: message.conversationId, messageId: message.id,
                           senderName: mine ? "Bạn" : message.senderName, date: message.date,
-                          encrypted: message.isE2EE || url?.query?.contains("e2esession") == true)
+                          encrypted: (message.isE2EE || url?.query?.contains("e2esession") == true) && url?.scheme != "data")
                 caption
             }
         case .gif(let url):
@@ -709,6 +745,10 @@ struct PhotoView: View {
     @Environment(ZaloEngine.self) private var engine
     @Environment(ShellModel.self) private var shell
 
+    private var isEncrypted: Bool {
+        encrypted && url?.scheme != "data"
+    }
+
     private var radius: CGFloat { tile == nil ? 16 : 8 }
 
     private var size: CGSize {
@@ -724,7 +764,7 @@ struct PhotoView: View {
         RemoteImage(url: url, contentMode: .fill, maxPixelSize: max(size.width, size.height) * 2) {
             Rectangle().fill(.quaternary).overlay { ProgressView().controlSize(.small) }
         }
-        .resolvingWith(first: encrypted) { force in
+        .resolvingWith(first: isEncrypted) { force in
             await engine.resolveMedia(conversationId: conversationId, messageId: messageId, kind: .photo, force: force)
         }
         .onFailure { reason, retry in MediaFailureView(failure: reason, retry: retry) }
@@ -1027,40 +1067,84 @@ struct FileCard: View {
         note = nil
         Task {
             defer { downloading = false }
-            guard let local = try? await MediaLoader.shared.localFile(for: url) else { return }
-            if Self.mayExecute(local, displayName: name) {
-                NSWorkspace.shared.activateFileViewerSelecting([local])
-                note = "Đã mở trong Finder vì tệp có thể chạy mã"
-            } else {
-                NSWorkspace.shared.open(local)
-            }
+            _ = await ChatFiles.open(url: url, displayName: name)
+        }
+    }
+
+    private func showInFinder() {
+        guard let url, !downloading else { return }
+        downloading = true
+        note = nil
+        Task {
+            defer { downloading = false }
+            _ = await ChatFiles.showInFinder(url: url, displayName: name)
+        }
+    }
+
+    private func saveAs() {
+        guard let url, !downloading else { return }
+        Task {
+            await ChatFiles.saveAs(url: url, displayName: name)
+        }
+    }
+
+    private func copyFile() {
+        guard let url, !downloading else { return }
+        Task {
+            await ChatFiles.copyFile(url: url, displayName: name)
         }
     }
 
     var body: some View {
-        Button(action: open) {
-            HStack(spacing: 10) {
-                Image(systemName: symbol)
-                    .font(.system(size: 20))
-                    .foregroundStyle(brandStyle(onMine: !mine))
-                    .frame(width: 38, height: 38)
-                    .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(brandStyle(onMine: mine)))
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(name).font(.system(size: 13, weight: .semibold)).lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                    if let note { Text(note).font(.system(size: 11)).opacity(0.85).fixedSize(horizontal: false, vertical: true) }
-                    else if size > 0 { Text(ChatFormat.bytes(size)).font(.system(size: 11.5)).opacity(0.75) }
+        HStack(spacing: 8) {
+            Button(action: open) {
+                HStack(spacing: 10) {
+                    Image(systemName: symbol)
+                        .font(.system(size: 20))
+                        .foregroundStyle(brandStyle(onMine: !mine))
+                        .frame(width: 38, height: 38)
+                        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(brandStyle(onMine: mine)))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(name).font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                        if let note { Text(note).font(.system(size: 11)).opacity(0.85).fixedSize(horizontal: false, vertical: true) }
+                        else if size > 0 { Text(ChatFormat.bytes(size)).font(.system(size: 11.5)).opacity(0.75) }
+                    }
+                    .frame(maxWidth: 200, alignment: .leading)
                 }
-                .frame(maxWidth: 200, alignment: .leading)
-                if downloading {
-                    ProgressView().controlSize(.small)
-                } else if url != nil {
-                    Image(systemName: "arrow.down.circle").font(.system(size: 16)).opacity(0.8)
+            }
+            .buttonStyle(.plain)
+            .disabled(url == nil)
+
+            if downloading {
+                ProgressView().controlSize(.small)
+                    .frame(width: 28, height: 28)
+            } else if url != nil {
+                Button(action: showInFinder) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Hiển thị trong Finder")
+                .accessibilityLabel("Hiển thị trong Finder")
+            }
+        }
+        .contextMenu {
+            if url != nil {
+                Button("Mở tệp", systemImage: "arrow.up.right.square") { open() }
+                Button("Hiển thị trong Finder", systemImage: "folder") { showInFinder() }
+                Button("Lưu thành…", systemImage: "square.and.arrow.down") { saveAs() }
+                Divider()
+                Button("Copy tệp", systemImage: "doc.on.doc") { copyFile() }
+                Button("Copy tên tệp", systemImage: "text.quote") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(name, forType: .string)
                 }
             }
         }
-        .buttonStyle(.plain)
-        .disabled(url == nil)
     }
 
     private var symbol: String {

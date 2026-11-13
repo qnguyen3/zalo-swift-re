@@ -55,6 +55,17 @@
     const patchBoundaries = () => {
       let n = 0;
       eachExport(req, (ex) => {
+        if (!ex || (typeof ex !== 'object' && typeof ex !== 'function')) return;
+        for (const candidate of [ex, ex.default, ex.a]) {
+          if (candidate && typeof candidate.uploadOptions === 'function' && !candidate.uploadOptions.__olazPatched) {
+            const orig = candidate.uploadOptions;
+            candidate.uploadOptions = function (extData) {
+              if (!extData || typeof extData !== 'object') return null;
+              try { return orig.call(this, extData); } catch (e) { return null; }
+            };
+            candidate.uploadOptions.__olazPatched = true;
+          }
+        }
         if (typeof ex !== 'function' || typeof ex.getDerivedStateFromError !== 'function') return;
         const proto = ex.prototype;
         if (!proto || typeof proto.componentDidCatch !== 'function' || proto.componentDidCatch.__olaz) return;
@@ -128,12 +139,12 @@
         publish();
         diag('redux store attached');
       };
-      const tryAttach = () => { const s = findStore(); if (s) { attach(s); startConversations(); return true; } return false; };
+      const tryAttach = () => { const s = findStore(); if (s) { attach(s); startConversations(s); return true; } return false; };
 
       // Conversation list from the official services: conv-info-manager (index),
       // friend/group modules (names, avatars), unread-manager, preview-manager.
       let convTimer = null;
-      const startConversations = () => {
+      const startConversations = (store) => {
         if (convTimer) return;
         const regs = () => diRegistrations(req);
         const pick = (pred) => { for (const r of regs()) { const i = r.instance; if (i && typeof i === 'object') { try { if (pred(i)) return i; } catch {} } } return null; };
@@ -244,6 +255,11 @@
           }
           return { text, ts: Number(p.messageTime || p.sendDttm || p.ts || 0), fromMe: !!p.isMe || String(p.fromUid) === '0', type: p.messageType || p.msgType || '' };
         };
+        let pubDebounce = null;
+        const schedulePublish = () => {
+          if (pubDebounce) return;
+          pubDebounce = setTimeout(() => { pubDebounce = null; publish().catch((e) => diag('conversations publish failed: ' + e)); }, 120);
+        };
         // Rows are posted as deltas: the first post carries every row with `reset: true`; later posts only the rows whose
         // JSON changed since they were last posted, plus the ids that left the index (`removed`). Swift merges by id
         // (ZaloEngine.mergeConversations), so a tick costs the bridge and the UI only what actually changed.
@@ -284,6 +300,7 @@
             published = true;
           }
         };
+        if (store && typeof store.subscribe === 'function') store.subscribe(schedulePublish);
         convTimer = setInterval(() => { publish().catch((e) => diag('conversations publish failed: ' + e)); }, 1500);
         publish().catch(() => {});
       };
@@ -361,14 +378,16 @@
     const snapshot = () => {
       const root = document.querySelector('.login-qr-page') || document.querySelector('#app-page');
       if (!root) return null;
+      const isUsableQrImg = (i) => i && i.src && !i.className.includes('qr-image--none') && !i.src.startsWith('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDIi') && (i.naturalWidth === 0 || i.naturalWidth >= 64);
       const imgs = Array.from(root.querySelectorAll('img')).filter((i) => i.src && i.naturalWidth >= 64);
-      const qrImg = root.querySelector('.qr-image img, img.qr-image, .login-qr__frame-qr img') || imgs.find((i) => i.src.startsWith('data:image/png') || i.src.startsWith('data:image/svg'));
+      const qrCandidate = root.querySelector('.qr-image img, img.qr-image, .login-qr__frame-qr img');
+      const qrImg = (isUsableQrImg(qrCandidate) ? qrCandidate : null) || imgs.find((i) => isUsableQrImg(i) && (i.src.startsWith('data:image/png') || i.src.startsWith('data:image/svg')));
       const canvas = root.querySelector('.login-qr__frame-qr canvas, .qr-code canvas');
       let qr = qrImg ? qrImg.src : null;
       if (!qr && canvas) { try { qr = canvas.toDataURL('image/png'); } catch {} }
       // The official page stops polling after `qr_retry` long-polls (~21 s each, so ~1 min) and marks the QR dead by
       // renaming its <img> to `qr-image--none` (src becomes a placeholder). Older builds used the other classes.
-      const invalid = !!root.querySelector('img.qr-image--none, .qr--invalid, .qr-img-err, .off--qr-code');
+      const invalid = !!root.querySelector('img.qr-image--none, .qr--invalid, .qr-img-err, .off--qr-code, .login-qr__frame-qr .mask:not(.mask--none)');
       if (invalid) qr = null;   // never forward the placeholder as a scannable QR
       const avatar = Array.from(root.querySelectorAll('img')).find((i) => /ava|avatar/.test(i.className + ' ' + i.src) && i !== qrImg);
       const buttons = Array.from(root.querySelectorAll('button, .z--btn--v2')).map((b) => (b.innerText || '').trim()).filter(Boolean);

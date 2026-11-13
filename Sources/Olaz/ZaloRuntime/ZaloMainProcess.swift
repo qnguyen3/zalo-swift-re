@@ -633,16 +633,30 @@ struct KeychainCipher {
 
     private func rootKey(_ identifier: String, create: Bool) throws -> Data {
         let account = "zprotocol.\(identifier.lowercased())"
+        let vaultKey = "zprotocol_\(identifier.lowercased())"
+        let vault = SafeStorage(platform: platform)
+        if let b64 = (try? vault.execute("get", [vaultKey])) as? String,
+           let cached = Data(base64Encoded: b64), cached.count == 32 {
+            return cached
+        }
         switch Keychain.read(account: account) {
-        case .found(let existing): return existing
-        // A key that exists but cannot be read now (locked keychain, denied access) must never be shadowed by a fresh one:
-        // everything sealed with the old key would be lost for good.
-        case .failed(let status): throw ZaloBridge.BridgeError(message: "Keychain read failed (\(status))")
-        case .notFound: break
+        case .found(let existing):
+            _ = try? vault.execute("set", [vaultKey, existing.base64EncodedString()])
+            return existing
+        // A key that exists in Keychain from an earlier code signature and fails ACL (-25293)
+        // can be replaced when minting a new key on QR link (`create == true`).
+        case .failed(let status):
+            if create && status == errSecAuthFailed {
+                break
+            }
+            throw ZaloBridge.BridgeError(message: "Keychain read failed (\(status))")
+        case .notFound:
+            break
         }
         guard create else { throw ZaloBridge.BridgeError(message: "No secret for \(identifier)") }
         let key = Self.random(32)
-        try Keychain.write(account: account, data: key)
+        _ = try? vault.execute("set", [vaultKey, key.base64EncodedString()])
+        try? Keychain.write(account: account, data: key)
         return key
     }
 }

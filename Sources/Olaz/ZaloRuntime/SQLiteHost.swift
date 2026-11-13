@@ -22,6 +22,7 @@ import SQLite3
 /// The official binding is SQLCipher; a database is only encrypted once the official "DB encryption" job ran on it,
 /// which Olaz never starts (`DB_ENCRYPTION/CHECKSTT` → not started), so files stay plain SQLite — as IndexedDB was.
 /// All work runs on one serial queue per database; the bridge handlers hop there and back to the main actor.
+@MainActor
 final class SQLiteHost: @unchecked Sendable {
     struct SQLiteError: LocalizedError {
         let errno: Int32
@@ -308,14 +309,14 @@ final class SQLiteHost: @unchecked Sendable {
         }
     }
 
-    private static func userVersion(_ db: OpaquePointer) throws -> Int {
+    nonisolated private static func userVersion(_ db: OpaquePointer) throws -> Int {
         let prepared = try prepare(db, "PRAGMA user_version;")
         defer { sqlite3_finalize(prepared) }
         guard sqlite3_step(prepared) == SQLITE_ROW else { return 0 }
         return Int(sqlite3_column_int64(prepared, 0))
     }
 
-    private static func transaction(_ db: OpaquePointer, _ body: () throws -> Void) throws {
+    nonisolated private static func transaction(_ db: OpaquePointer, _ body: () throws -> Void) throws {
         try exec(db, "BEGIN TRANSACTION")
         do {
             try body()
@@ -326,12 +327,12 @@ final class SQLiteHost: @unchecked Sendable {
         }
     }
 
-    private static func exec(_ db: OpaquePointer, _ sql: String) throws {
+    nonisolated private static func exec(_ db: OpaquePointer, _ sql: String) throws {
         guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw error(db, fallback: SQLITE_ERROR) }
     }
 
     /// Runs `statement`: with parameters a single statement; without, every statement of the text (pragmas, DDL).
-    private static func execute(_ db: OpaquePointer, _ statement: Statement) throws {
+    nonisolated private static func execute(_ db: OpaquePointer, _ statement: Statement) throws {
         if statement.params.isEmpty {
             try statement.query.withCString { text in
                 var tail: UnsafePointer<CChar>? = text
@@ -351,20 +352,20 @@ final class SQLiteHost: @unchecked Sendable {
         try stepToEnd(prepared, db)
     }
 
-    private static func rows(_ db: OpaquePointer, _ statement: Statement, limit: Int? = nil) throws -> [[String: Any]] {
+    nonisolated private static func rows(_ db: OpaquePointer, _ statement: Statement, limit: Int? = nil) throws -> [[String: Any]] {
         let prepared = try prepare(db, statement.query)
         defer { sqlite3_finalize(prepared) }
         try bind(prepared, statement.params, db)
         return try collect(prepared, db, limit: limit)
     }
 
-    private static func prepare(_ db: OpaquePointer, _ sql: String) throws -> OpaquePointer {
+    nonisolated private static func prepare(_ db: OpaquePointer, _ sql: String) throws -> OpaquePointer {
         var prepared: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &prepared, nil) == SQLITE_OK, let prepared else { throw error(db, fallback: SQLITE_ERROR) }
         return prepared
     }
 
-    private static func stepToEnd(_ prepared: OpaquePointer, _ db: OpaquePointer) throws {
+    nonisolated private static func stepToEnd(_ prepared: OpaquePointer, _ db: OpaquePointer) throws {
         while true {
             let rc = sqlite3_step(prepared)
             if rc == SQLITE_DONE { return }
@@ -373,7 +374,7 @@ final class SQLiteHost: @unchecked Sendable {
         }
     }
 
-    private static func collect(_ prepared: OpaquePointer, _ db: OpaquePointer, limit: Int?) throws -> [[String: Any]] {
+    nonisolated private static func collect(_ prepared: OpaquePointer, _ db: OpaquePointer, limit: Int?) throws -> [[String: Any]] {
         var out: [[String: Any]] = []
         let count = Int(sqlite3_column_count(prepared))
         let names = (0..<count).map { String(cString: sqlite3_column_name(prepared, Int32($0))) }
@@ -402,11 +403,11 @@ final class SQLiteHost: @unchecked Sendable {
         return out
     }
 
-    private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+    nonisolated private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     /// Binds JS values the way node-sqlite3 does: numbers as INTEGER / REAL, booleans as 0 / 1, strings as TEXT,
     /// bytes as BLOB, null / undefined / anything else as NULL.
-    private static func bind(_ prepared: OpaquePointer, _ params: [Any], _ db: OpaquePointer) throws {
+    nonisolated private static func bind(_ prepared: OpaquePointer, _ params: [Any], _ db: OpaquePointer) throws {
         let expected = Int(sqlite3_bind_parameter_count(prepared))
         for index in 0..<expected {
             let position = Int32(index + 1)
@@ -434,7 +435,7 @@ final class SQLiteHost: @unchecked Sendable {
         }
     }
 
-    private static func error(_ db: OpaquePointer?, fallback: Int32) -> SQLiteError {
+    nonisolated private static func error(_ db: OpaquePointer?, fallback: Int32) -> SQLiteError {
         let errno = db.map { sqlite3_extended_errcode($0) & 0xff } ?? fallback
         let primary = errno == 0 ? fallback : errno
         let detail = db.map { String(cString: sqlite3_errmsg($0)) } ?? String(cString: sqlite3_errstr(fallback))
@@ -442,7 +443,7 @@ final class SQLiteHost: @unchecked Sendable {
     }
 
     /// node-sqlite3's `code` strings for the primary result codes.
-    static func codeName(_ errno: Int32) -> String {
+    nonisolated static func codeName(_ errno: Int32) -> String {
         let names: [Int32: String] = [
             1: "SQLITE_ERROR", 2: "SQLITE_INTERNAL", 3: "SQLITE_PERM", 4: "SQLITE_ABORT", 5: "SQLITE_BUSY", 6: "SQLITE_LOCKED",
             7: "SQLITE_NOMEM", 8: "SQLITE_READONLY", 9: "SQLITE_INTERRUPT", 10: "SQLITE_IOERR", 11: "SQLITE_CORRUPT",
@@ -522,16 +523,16 @@ extension SQLiteHost {
     }
 
     /// Official statement objects: `{query: {query, params: <count>}, params: [...]}`; `query` may also be the SQL text.
-    private static func query(_ value: Any?) -> String {
+    nonisolated private static func query(_ value: Any?) -> String {
         if let text = value as? String { return text }
         return (value as? [String: Any])?["query"] as? String ?? ""
     }
 
-    private static func statement(_ object: [String: Any]) -> Statement {
+    nonisolated private static func statement(_ object: [String: Any]) -> Statement {
         Statement(query: query(object["query"]), params: object["params"] as? [Any] ?? [])
     }
 
-    private static func rows(_ value: Any?) -> [[Any]] {
+    nonisolated private static func rows(_ value: Any?) -> [[Any]] {
         (value as? [Any] ?? []).map { $0 as? [Any] ?? [] }
     }
 }

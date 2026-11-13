@@ -201,8 +201,15 @@ struct CardActions {
     }
 }
 
+private struct CardActionsKey: EnvironmentKey {
+    nonisolated(unsafe) static let defaultValue = CardActions()
+}
+
 extension EnvironmentValues {
-    @Entry var cardActions = CardActions()
+    var cardActions: CardActions {
+        get { self[CardActionsKey.self] }
+        set { self[CardActionsKey.self] = newValue }
+    }
 }
 
 private struct CardActionHost: ViewModifier {

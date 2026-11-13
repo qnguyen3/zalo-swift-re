@@ -66,26 +66,31 @@ struct ConversationListColumn: View {
     /// list is exactly what the official ConvListController computed for the active filter.
     private var items: [ListItem] {
         let all = engine.conversations
+        let lookup = engine.conversationsById
         if isSearching {
             // Hidden chats only show up when the query is the PIN (official sidebar search).
             let hidden = engine.conversationActions.hiddenIds
-            let byPIN = pinMatches.compactMap { id in all.first { $0.id == id } }
+            let byPIN = pinMatches.compactMap { lookup[$0] }
             let byName = all.filter { !hidden.contains($0.id) && $0.displayName.localizedCaseInsensitiveContains(query) }
             return (byPIN + byName).map(ListItem.conversation)
         }
         if destination == .hidden {
-            return (shell.unlockedHiddenIds ?? []).compactMap { id in all.first { $0.id == id } }.map(ListItem.conversation)
+            return (shell.unlockedHiddenIds ?? []).compactMap { lookup[$0] }.map(ListItem.conversation)
         }
         // Hidden chats are removed in every mode (the controller may still list one right after a local hide).
-        let visible = all.filter { !engine.conversationActions.isHidden($0.id) }
-        guard extras.loaded else { return visible.map(ListItem.conversation) }
-        let byId = Dictionary(visible.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        if !extras.loaded {
+            return all.filter { !engine.conversationActions.isHidden($0.id) }.map(ListItem.conversation)
+        }
+        let visibleById: (String) -> ZaloEngine.ConversationSummary? = { id in
+            guard !engine.conversationActions.isHidden(id) else { return nil }
+            return lookup[id]
+        }
         if destination == .strangers {
-            return extras.strangerFolderIds.compactMap { byId[$0] }.map(ListItem.conversation)
+            return extras.strangerFolderIds.compactMap(visibleById).map(ListItem.conversation)
         }
         return extras.listIds.compactMap { id -> ListItem? in
             if id == ConversationExtras.strangerBoxId { return extras.strangerBox.chats > 0 ? .strangerBox : nil }
-            return byId[id].map(ListItem.conversation)
+            return visibleById(id).map(ListItem.conversation)
         }
     }
 

@@ -4,7 +4,7 @@ import Foundation
 
 /// `SQLiteHost` reproduces what the official `utility-process-sqlite` does with node-sqlite3 for the statements the
 /// data access layer sends through `sqlite-host.js`. Databases live in a temporary directory.
-@Suite struct SQLiteHostTests {
+@Suite @MainActor struct SQLiteHostTests {
     private func host() throws -> SQLiteHost {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("OlazSQLiteHostTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
