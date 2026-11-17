@@ -2,6 +2,12 @@
 
 **A native Linux client for [Zalo](https://zalo.me), written in Rust with [GPUI](https://www.gpui.rs).**
 
+| Light | Dark |
+|---|---|
+| ![Olaz for Linux, light](screenshots/chat-light.png) | ![Olaz for Linux, dark](screenshots/chat-dark.png) |
+
+<sub>Screenshots use sample data, not a real account.</sub>
+
 This is the Linux port of Olaz (the macOS app in this repository). Like the macOS app it does **not**
 re-implement Zalo's protocol: it runs the **official Zalo PC renderer** (`app.asar`) hidden inside WebKitGTK and
 supplies in Rust everything Electron's preload and main process used to provide (IPC bridge, network, storage,
