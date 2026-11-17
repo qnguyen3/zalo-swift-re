@@ -1,0 +1,19 @@
+dist/
+build-flatpak/
+.flatpak-builder/
+renders/
+
+# Local only (not published): design docs, macOS comparison tooling and doc generators.
+docs/
+ci/
+reference/
+ui-reference/
+shared/spec/
+
+# Development data and tooling (kept locally only): UI fixture scenes, scripts (reference/tools), macOS sync state.
+fixtures/
+.last-sync
+shared/js-modules/
+shared/ui-assets/olaz.icns
+fingerprint-helper/build/
+fingerprint-helper/vendor/
