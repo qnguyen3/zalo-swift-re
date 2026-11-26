@@ -255,6 +255,18 @@ struct ChatMessage: Identifiable, Equatable, Sendable {
     struct Quote: Equatable, Sendable {
         var senderName: String
         var text: String
+        /// Server / client id of the quoted message ("" when unknown).
+        var msgId: String = ""
+        var cliMsgId: String = ""
+
+        /// The loaded message this quote points at, by either of its ids (`id` / `altId`); a photo of an album is keyed
+        /// `<parent id>#<index>`, so a quote of the album lands on its first photo.
+        func target(in list: [ChatMessage]) -> ChatMessage? {
+            let ids = [msgId, cliMsgId].filter { !$0.isEmpty }
+            guard !ids.isEmpty else { return nil }
+            return list.last { m in ids.contains { m.id == $0 || m.altId == $0 } }
+                ?? list.first { m in ids.contains { m.id.hasPrefix($0 + "#") } }
+        }
     }
 
     struct Reaction: Equatable, Sendable, Identifiable {
@@ -305,6 +317,9 @@ struct ChatMessage: Identifiable, Equatable, Sendable {
     var suggestsStickers: Bool = false
     /// What the official right-click menu offers for this message (forward, recall, delete, pin, star).
     var menu = MessageMenu()
+    /// The message's other id ("" when unknown): the client id of someone else's message, the server id of mine. Quotes
+    /// may carry only one of the two (an image quote has `globalMsgId` 0).
+    var altId: String = ""
 }
 
 /// The items of the official message context menu (message-actions-adapter.js `describe`, the builder's own conditions) with the
@@ -359,7 +374,8 @@ extension ChatMessage {
         func number(_ value: Any?) -> Double { (value as? NSNumber)?.doubleValue ?? 0 }
         var quote: Quote?
         if let q = json["quote"] as? [String: Any] {
-            quote = Quote(senderName: q["senderName"] as? String ?? "", text: q["text"] as? String ?? "")
+            quote = Quote(senderName: q["senderName"] as? String ?? "", text: q["text"] as? String ?? "",
+                          msgId: q["msgId"] as? String ?? "", cliMsgId: q["cliMsgId"] as? String ?? "")
         }
         let reactions = (json["reactions"] as? [[String: Any]] ?? []).compactMap { r -> Reaction? in
             guard let icon = ReactionIcon(json: r) else { return nil }
@@ -389,6 +405,7 @@ extension ChatMessage {
             suggestsStickers: json["stickers"] as? Bool ?? false,
             menu: MessageMenu(json: json["menu"])
         )
+        altId = json["altId"] as? String ?? ""
     }
 }
 

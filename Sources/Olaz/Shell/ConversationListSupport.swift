@@ -87,15 +87,6 @@ struct ConversationUnreadDot: View {
     }
 }
 
-extension ZaloEngine.ConversationSummary {
-    /// Name under a pinned tile: the given name (last word) of a person, the full name of a group.
-    func tileName(isSelf: Bool) -> String {
-        if isSelf { return "Cloud" }
-        if isGroup { return displayName }
-        return displayName.split(separator: " ").last.map(String.init) ?? displayName
-    }
-}
-
 /// Horizontal shake for a rejected PIN.
 struct ConversationListShake: GeometryEffect {
     var travel: CGFloat = 8

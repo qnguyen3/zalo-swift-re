@@ -170,6 +170,16 @@ final class ZaloMainProcess {
         return query
     }
 
+    /// Last `request_relaunch` answered (`reloadPages` at most once a minute for it).
+    private var lastRelaunch: Date?
+
+    /// What Electron's relaunch amounts to here: adapter state reset, the shared worker restarted, the page loaded again.
+    private func reloadPages() {
+        normalizeDatabaseAdapterState()
+        if hasSession { startSharedWorker() } else { stopSharedWorker() }
+        host?.load(hasSession ? .main : .login, query: pageQuery())
+    }
+
     func start() {
         guard let host else { return }
         normalizeDatabaseAdapterState()
@@ -346,9 +356,23 @@ final class ZaloMainProcess {
         bridge.handle("migratedb:signal_restart") { [weak self] _ in
             guard let self else { return nil }
             mainLog.notice("renderer requested restart for DB migration — reloading on \(self.storage.rawValue, privacy: .public)")
-            self.normalizeDatabaseAdapterState()
-            if self.hasSession { self.startSharedWorker() } else { self.stopSharedWorker() }
-            self.host?.load(self.hasSession ? .main : .login, query: self.pageQuery())
+            self.reloadPages()
+            return nil
+        }
+        // `$zapp.requestRelaunch`: the renderer's recovery path (`restartApp`, e.g. a session renewed during a slow
+        // start) sets its flag and waits for Electron's `app.relaunch()`. Unanswered, the page sits signed in with an
+        // empty inbox. At most one reload a minute, so a renderer that keeps asking cannot loop.
+        bridge.handle("request_relaunch") { [weak self] _ in
+            guard let self else { return nil }
+            let now = Date()
+            if let last = self.lastRelaunch, now.timeIntervalSince(last) < 60 {
+                mainLog.notice("renderer requested relaunch again within a minute — ignored")
+                return nil
+            }
+            self.lastRelaunch = now
+            mainLog.notice("renderer requested relaunch — reloading")
+            EngineLog.shared.write("relaunch requested by the renderer — reloading the pages")
+            self.reloadPages()
             return nil
         }
 

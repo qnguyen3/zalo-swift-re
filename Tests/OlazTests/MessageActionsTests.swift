@@ -53,6 +53,22 @@ import Foundation
         #expect(list.items[0].message(in: [message(.text, id: "x")]) == nil && list.items[1].message(in: [mine]) == nil)
     }
 
+    @Test func quoteFindsItsMessage() throws {
+        let parsed = ChatMessage(json: ["id": "1", "kind": ["type": "text"],
+                                        "quote": ["senderName": "A", "text": "x", "msgId": "900", "cliMsgId": "500"]], fallbackConversation: "c")
+        let quote = try #require(parsed?.quote)
+        #expect(quote.msgId == "900" && quote.cliMsgId == "500")
+        // Mine by client id, theirs by server id, an album by its first photo.
+        #expect(quote.target(in: [message(.text, id: "500")])?.id == "500")
+        #expect(quote.target(in: [message(.text, id: "900")])?.id == "900")
+        #expect(quote.target(in: [message(.text, id: "900#0"), message(.text, id: "900#1")])?.id == "900#0")
+        #expect(quote.target(in: [message(.text, id: "9000")]) == nil)
+        // An image quote carries only the client id; someone else's row is keyed by the server id.
+        var theirs = message(.text, id: "8484"); theirs.altId = "500"
+        #expect(ChatMessage.Quote(senderName: "A", text: "x", cliMsgId: "500").target(in: [theirs])?.id == "8484")
+        #expect(ChatMessage.Quote(senderName: "A", text: "x").target(in: [message(.text, id: "")]) == nil)
+    }
+
     @Test func copyTextFollowsTheKind() {
         #expect(message(.text, text: "Xin chào").copyableText == "Xin chào")
         #expect(message(.text).copyableText == nil)

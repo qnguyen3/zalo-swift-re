@@ -291,7 +291,9 @@
     }
   };
   setInterval(publish, 8000);
-  setInterval(() => { if (!lastKey || !ready()) publish(); }, 1000);   // until the services resolve and the hidden state is loaded
+  // Until the services resolve and the hidden state is loaded; for the first 2 minutes only (a service that never shows up must
+  // not keep a full snapshot running every second; the 8 s tick and the official events carry on after that).
+  setInterval(() => { if ((!lastKey || !ready()) && Date.now() - startedAt < 120000) publish(); }, 1000);
   setTimeout(publish, 500);
   const publishSoon = () => schedule(150);
 

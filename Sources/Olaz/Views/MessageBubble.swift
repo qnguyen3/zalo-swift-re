@@ -131,6 +131,12 @@ private struct MessageTourAnchor: ViewModifier {
     }
 }
 
+extension EnvironmentValues {
+    /// `OlazAccent.rawValue` and "a wallpaper is set", read once by the message list instead of an `@AppStorage` per row.
+    @Entry var chatAccentRaw: String = OlazAccent.blue.rawValue
+    @Entry var chatHasWallpaper: Bool = false
+}
+
 struct MessageRow: View {
     let message: ChatMessage
     let isGroup: Bool
@@ -145,14 +151,13 @@ struct MessageRow: View {
 
     @Environment(ZaloEngine.self) private var engine
     @Environment(\.olazTextScale) private var textScale
-    @AppStorage(OlazPrefs.accent) private var accentStored = OlazAccent.blue.rawValue
-    @AppStorage(OlazPrefs.wallpaper) private var wallpaperStored = ChatWallpaper.none.rawValue
+    @Environment(\.chatAccentRaw) private var accentStored
+    @Environment(\.chatHasWallpaper) private var hasWallpaper
     @State private var hovering = false
     @State private var showsReactionPicker = false
     private static let reactionEmojis = ["❤️", "👍", "😆", "😮", "😢", "😡"]
 
     private var mine: Bool { message.isMine }
-    private var hasWallpaper: Bool { wallpaperStored != ChatWallpaper.none.rawValue }
     private func scaled(_ size: CGFloat) -> CGFloat { size * textScale }
 
     var body: some View {
@@ -636,10 +641,16 @@ private struct ReactionPickerButton: View {
 
 // MARK: - Pieces
 
+extension EnvironmentValues {
+    /// Tap on a quote banner: bring the quoted message into view (set by the message list).
+    @Entry var openQuote: ((ChatMessage.Quote) -> Void)? = nil
+}
+
 private struct QuoteBlock: View {
     let quote: ChatMessage.Quote
     let mine: Bool
     @Environment(\.olazTextScale) private var textScale
+    @Environment(\.openQuote) private var openQuote
 
     var body: some View {
         HStack(spacing: 6) {
@@ -653,6 +664,11 @@ private struct QuoteBlock: View {
         .padding(.vertical, 4).padding(.horizontal, 6)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
             .fill(mine ? Color.white.opacity(0.18) : Color.primary.opacity(0.06)))
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onTapGesture { openQuote?(quote) }
+        .pointerStyle(openQuote == nil ? nil : .link)
+        .accessibilityAddTraits(openQuote == nil ? [] : .isButton)
+        .accessibilityHint(openQuote == nil ? "" : "Đi tới tin nhắn gốc")
     }
 }
 
@@ -662,7 +678,7 @@ private struct ReactionChips: View {
     let reactions: [ChatMessage.Reaction]
     let conversationId: String
     let messageId: String
-    @AppStorage(OlazPrefs.accent) private var accentStored = OlazAccent.blue.rawValue
+    @Environment(\.chatAccentRaw) private var accentStored
     @State private var showsDetail = false
 
     var body: some View {

@@ -24,6 +24,8 @@ enum OlazPrefs {
     static let didFinishSetup = "olaz.didFinishSetup"
     /// A fresh QR sign-in happened and the setup's sync / welcome steps are still due (survives a relaunch).
     static let setupPending = "olaz.setupPending"
+    /// The inbox lists every pinned chat as a row under the avatar strip (default: only pins with unread messages).
+    static let pinsExpanded = "olaz.pinsExpanded"
 }
 
 /// Accent color picked in Settings ▸ Giao diện; applied with `.tint` at the window root, so views use `.tint` /

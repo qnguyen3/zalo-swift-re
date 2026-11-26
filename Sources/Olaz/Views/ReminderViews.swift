@@ -38,21 +38,24 @@ struct ReminderCardView: View {
 
     // MARK: Static card (from the message)
 
+    /// Compact, about the height of a two-line message: a small date tile, the title, then time · repeat on one line.
     private var staticCard: some View {
-        HStack(spacing: 14) {
-            ReminderCalendar(start: card.reminderStart)
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 10) {
+            ReminderCalendar(start: card.reminderStart, compact: true)
+            VStack(alignment: .leading, spacing: 2) {
                 Text(card.reminderTitle.isEmpty ? "Nhắc hẹn" : card.reminderTitle)
-                    .font(.system(size: 14, weight: .semibold)).lineLimit(3)
-                ReminderMeta(start: card.reminderStart, repeatLabel: card.reminderRepeat)
+                    .font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                ReminderMeta(start: card.reminderStart, repeatLabel: card.reminderRepeat, compact: true)
             }
             Spacer(minLength: 0)
         }
-        .padding(12)
-        .frame(width: 300)
-        .cardChrome(radius: 16)
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .frame(width: Self.width)
+        .cardChrome(radius: 14)
         .accessibilityElement(children: .combine)
     }
+
+    static let width: CGFloat = 260
 
     // MARK: Official variants
 
@@ -69,25 +72,25 @@ struct ReminderCardView: View {
     private func invite(_ s: ReminderSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Button { actions.showReminder() } label: {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 6) {
                     if s.onlyMe {
                         Text("(Chỉ bạn nhìn thấy)").font(.system(size: 11.5)).foregroundStyle(.secondary)
                     }
                     if !s.creatorName.isEmpty {
                         Text(s.creatorName + " tạo nhắc hẹn").font(.system(size: 12)).foregroundStyle(.secondary)
                     }
-                    HStack(spacing: 14) {
-                        ReminderCalendar(start: s.start)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(s.title.isEmpty ? "Nhắc hẹn" : s.title).font(.system(size: 14, weight: .semibold)).lineLimit(3)
+                    HStack(spacing: 10) {
+                        ReminderCalendar(start: s.start, compact: true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(s.title.isEmpty ? "Nhắc hẹn" : s.title).font(.system(size: 13, weight: .semibold)).lineLimit(2)
                                 .strikethrough(s.deleted)
-                            ReminderMeta(start: s.start, repeatLabel: s.repeatLabel)
+                            ReminderMeta(start: s.start, repeatLabel: s.repeatLabel, compact: true)
                         }
                         Spacer(minLength: 0)
                     }
                     if s.deleted { Text("Nhắc hẹn đã bị xoá").font(.system(size: 12)).foregroundStyle(.orange) }
                 }
-                .padding(12)
+                .padding(.horizontal, 10).padding(.vertical, 8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
@@ -104,7 +107,7 @@ struct ReminderCardView: View {
                     }
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(s.deleted ? AnyShapeStyle(Color.secondary) : AnyShapeStyle(.tint))
-                    .padding(.horizontal, 12).padding(.bottom, 10)
+                    .padding(.horizontal, 10).padding(.bottom, 8)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -115,37 +118,37 @@ struct ReminderCardView: View {
                 ReminderRsvpButtons(snapshot: s)
             } else if s.showsRsvpStatus {
                 Divider()
-                ReminderRsvpStatus(snapshot: s).padding(.horizontal, 12).padding(.vertical, 8)
+                ReminderRsvpStatus(snapshot: s).padding(.horizontal, 10).padding(.vertical, 6)
             }
         }
-        .frame(width: 300)
-        .cardChrome(radius: 16)
+        .frame(width: Self.width)
+        .cardChrome(radius: 14)
     }
 
     /// `AlertCard`: the reminder is due.
     private func alert(_ s: ReminderSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 12) {
-                Image(systemName: "alarm.fill").font(.system(size: 20)).foregroundStyle(.orange)
-                VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 10) {
+                Image(systemName: "alarm.fill").font(.system(size: 17)).foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
                     if s.onlyMe { Text("(Chỉ bạn nhìn thấy)").font(.system(size: 11.5)).foregroundStyle(.secondary) }
-                    Text("Nhắc hẹn: \(s.title)").font(.system(size: 14, weight: .semibold)).lineLimit(3).strikethrough(s.deleted)
+                    Text("Nhắc hẹn: \(s.title)").font(.system(size: 13, weight: .semibold)).lineLimit(2).strikethrough(s.deleted)
                     if let start = s.start {
                         Text(CardFormat.dateTime.string(from: start).capitalized).font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                 }
                 Spacer(minLength: 0)
             }
-            .padding(12)
+            .padding(.horizontal, 10).padding(.vertical, 8)
             Divider()
             Button { actions.showReminder() } label: {
                 Text("Xem chi tiết").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.tint)
-                    .frame(maxWidth: .infinity).padding(.vertical, 10).contentShape(Rectangle())
+                    .frame(maxWidth: .infinity).padding(.vertical, 7).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         }
-        .frame(width: 300)
-        .cardChrome(radius: 16)
+        .frame(width: Self.width)
+        .cardChrome(radius: 14)
     }
 
     /// One line (`demotedCreate` / `demotedAlert`) with "Xem".
@@ -174,8 +177,28 @@ struct ReminderCardView: View {
 /// The calendar block of the reminder cards.
 struct ReminderCalendar: View {
     let start: Date?
+    /// The small tile of the chat cards: day number and month only.
+    var compact = false
 
     var body: some View {
+        if compact { small } else { full }
+    }
+
+    private var small: some View {
+        VStack(spacing: 0) {
+            Rectangle().fill(Color.red).frame(height: 5)
+            Text(start.map { CardFormat.day.string(from: $0) } ?? "--")
+                .font(.system(size: 15, weight: .bold, design: .rounded)).padding(.top, 1)
+            Text(start.map { CardFormat.month.string(from: $0).capitalized } ?? "")
+                .font(.system(size: 8.5)).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.7).padding(.bottom, 3)
+        }
+        .frame(width: 38)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5))
+    }
+
+    private var full: some View {
         VStack(spacing: 0) {
             Text(start.map { CardFormat.weekday.string(from: $0).capitalized } ?? "")
                 .font(.system(size: 10.5, weight: .semibold)).foregroundStyle(.white)
@@ -195,8 +218,23 @@ struct ReminderCalendar: View {
 struct ReminderMeta: View {
     let start: Date?
     let repeatLabel: String
+    /// One line: "Thứ Năm 26/11/2026 10:00 · Nhắc theo ngày".
+    var compact = false
 
     var body: some View {
+        if compact {
+            let parts = [start.map { CardFormat.dateTime.string(from: $0).capitalized } ?? "", repeatLabel].filter { !$0.isEmpty }
+            if !parts.isEmpty {
+                Text(parts.joined(separator: " · "))
+                    .font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    .help(parts.joined(separator: " · "))
+            }
+        } else {
+            rows
+        }
+    }
+
+    private var rows: some View {
         VStack(alignment: .leading, spacing: 4) {
             if let start {
                 Label(CardFormat.dateTime.string(from: start).capitalized, systemImage: "clock")

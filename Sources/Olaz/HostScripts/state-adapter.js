@@ -156,7 +156,26 @@
             convs: pick((i) => typeof i.getConvByIdSync === 'function' && typeof i.addOrUpdateConv === 'function'),
             unread: pick((i) => typeof i.getUnreadByConvIdSync === 'function'),
             preview: pick((i) => typeof i.convertDBMessageToPreviewItem === 'function'),
+            pin: pick((i) => typeof i.getLimitPinnedConversation === 'function' && typeof i.pin === 'function'),
           };
+        };
+        // Official change events drive the list (throttled to one pass a second); the timer is a slow safety net for what
+        // has no event (names / avatars that resolve later). A pass walks every conversation, which costs tens of ms on a
+        // large account, so a 1.5 s poll alone kept the renderer at ~2% CPU while idle.
+        let soonTimer = null, lastRun = 0, hooked = false;
+        const runPublish = () => { lastRun = Date.now(); publish().catch((e) => diag('conversations publish failed: ' + scrubErr(e))); };
+        const publishSoon = () => {
+          if (soonTimer) return;
+          soonTimer = setTimeout(() => { soonTimer = null; runPublish(); }, Math.max(150, 1000 - (Date.now() - lastRun)));
+        };
+        const hookModules = (m) => {
+          if (hooked) return;
+          hooked = true;
+          const on = (mgr, names) => { if (mgr && typeof mgr.addEventListener === 'function') for (const n of names) safe(() => mgr.addEventListener(n, publishSoon), null); };
+          on(m.preview, ['PreviewChanged']);
+          on(m.unread, ['ChangeUnreadCount', 'ReadConv']);
+          on(m.convs, ['DeleteConv', 'LeaveGroup', 'AddConv', 'UpdateConv']);
+          on(m.pin, ['ChangePinConv']);
         };
         const safe = (fn, d) => { try { const v = fn(); return v === undefined ? d : v; } catch { return d; } };
         // Official preview formatter: module exporting `a(previewItem, opts) -> {icon, message,
@@ -262,6 +281,7 @@
           beginTick();
           if (!modules) { modules = await loadModules().catch(() => null); if (!modules || !modules.convs) { modules = null; return; } }
           const m = modules;
+          hookModules(m);
           const missing = [];
           const changed = [];
           const seen = new Set();
@@ -293,8 +313,8 @@
             published = true;
           }
         };
-        convTimer = setInterval(() => { publish().catch((e) => diag('conversations publish failed: ' + scrubErr(e))); }, 1500);
-        publish().catch(() => {});
+        convTimer = setInterval(() => { if (!modules || Date.now() - lastRun >= 4500) runPublish(); }, 1500);
+        runPublish();
       };
       if (!tryAttach()) { const t = setInterval(() => { if (tryAttach()) clearInterval(t); }, 500); }
       return true;
