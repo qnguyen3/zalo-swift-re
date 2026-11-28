@@ -204,9 +204,9 @@ struct ConversationListPinChip: View {
 /// Leading "Ghim" / "Bỏ ghim" and trailing "Đã đọc" / "Chưa đọc", offered exactly when the context menu offers them.
 struct ConversationListSwipeActions: ViewModifier {
     @Environment(ZaloEngine.self) private var engine
-    /// Swipe buttons take a plain color, not the root `.tint` style.
-    @AppStorage(OlazPrefs.accent) private var accent = OlazAccent.blue
     let conversation: ZaloEngine.ConversationSummary
+    /// Swipe buttons take a plain color, not the root `.tint` style. Read once by the list, not per row.
+    let accent: OlazAccent
 
     func body(content: Content) -> some View {
         let state = engine.conversationActions

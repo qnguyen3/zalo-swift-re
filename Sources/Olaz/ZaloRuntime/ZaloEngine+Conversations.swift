@@ -109,6 +109,7 @@ extension ZaloEngine {
 
     /// Drives the official ConvListController filter (type + label ids); the resulting list comes back as `listIds`.
     func setConversationFilter(_ type: ConversationTypeFilter, labelIds: [String] = []) {
+        flushListUpdates() // the edit below must land on the newest extras, not be overwritten by a staged snapshot
         conversationExtras.typeFilter = type.rawValue
         conversationExtras.labelFilterIds = labelIds
         callChat("setFilter", type.rawValue, labelIds, object: "__zaloConversations")
@@ -117,6 +118,7 @@ extension ZaloEngine {
     /// Assigns the conversation to `labelId`, or removes its label when nil (official label manager).
     func setConversationLabel(_ conversationId: String, labelId: String?) {
         // Optimistic: the official client confirms through the next snapshot.
+        flushListUpdates()
         var next = conversationExtras
         let previous = next.labelByConversation[conversationId]
         next.labelByConversation[conversationId] = labelId
@@ -144,7 +146,7 @@ extension ZaloEngine {
 
     func handleConversationExtras(state: [String: Any]) {
         guard let json = state["conversationExtras"] as? [String: Any] else { return }
-        var next = conversationExtras
+        var next = latestConversationExtras
         next.loaded = true
 
         if let id = json["selfConversationId"] as? String, !id.isEmpty, id != selfConversationId { selfConversationId = id }
@@ -186,6 +188,8 @@ extension ZaloEngine {
         if let action = json["action"] as? [String: Any], let seq = (action["seq"] as? NSNumber)?.intValue {
             next.notice = ConversationExtras.Notice(seq: seq, ok: action["ok"] as? Bool ?? false, text: action["text"] as? String ?? "")
         }
-        if next != conversationExtras { conversationExtras = next }
+        stageConversationExtras(next)
+        // The outcome of a user action (toast) is shown right away.
+        if json["action"] != nil { flushListUpdates() }
     }
 }

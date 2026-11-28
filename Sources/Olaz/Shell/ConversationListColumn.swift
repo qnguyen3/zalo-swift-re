@@ -43,6 +43,12 @@ struct ConversationListColumn: View {
     @State private var lastSearch: String?
     /// The hidden-chat state did not arrive for a long while: say so instead of spinning forever (everything stays locked).
     @State private var hiddenStateStalled = false
+    /// Read once for every row's swipe tint (an `@AppStorage` per row showed in the profile).
+    @AppStorage(OlazPrefs.accent) private var accent = OlazAccent.blue
+    /// Rows rendered so far: the list grows by `rowPage` when its end comes on screen. A SwiftUI `List` re-diffs every row
+    /// it holds on each conversation update, which on a large account cost ~75 ms per update.
+    @State private var rowLimit = Self.rowPage
+    private static let rowPage = 120
 
     private var extras: ConversationExtras { engine.conversationExtras }
     private var query: String { shell.search.trimmingCharacters(in: .whitespaces) }
@@ -196,14 +202,27 @@ struct ConversationListColumn: View {
                     .listRowSeparator(.hidden)
                     .selectionDisabled()
             }
+            let shown = Array(listing.rows.prefix(rowLimit))
             if isSearching {
-                Section("Cuộc trò chuyện") { rows(listing.rows) }
+                Section("Cuộc trò chuyện") { rows(shown) }
             } else {
-                rows(listing.rows)
+                rows(shown)
+            }
+            if listing.rows.count > shown.count {
+                // The end of the rendered rows came on screen: render the next page.
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity)
+                    .listRowSeparator(.hidden)
+                    .selectionDisabled()
+                    .onAppear { rowLimit = shown.count + Self.rowPage }
             }
         }
         .listStyle(.inset)
         .scrollEdgeEffectStyle(.soft, for: .top)
+        // Another mailbox / label / search starts from the first page again.
+        .onChange(of: destination) { _, _ in rowLimit = Self.rowPage }
+        .onChange(of: query) { _, _ in rowLimit = Self.rowPage }
     }
 
     /// Pins shown as rows under the strip: all of them when expanded, else the ones with unread messages (or the manual
@@ -220,19 +239,20 @@ struct ConversationListColumn: View {
         ForEach(items) { item in
             switch item {
             case .conversation(let conversation):
-                ConversationListRow(conversation: conversation,
-                                    label: extras.label(of: conversation.id),
-                                    showsPin: !(destination == .inbox && !isSearching) && engine.conversationActions.isPinned(conversation.id),
-                                    unreadMark: engine.conversationActions.hasUnreadMark(conversation.id),
-                                    isStranger: destination != .strangers && extras.strangerIds.contains(conversation.id),
-                                    isSelf: conversation.id == engine.selfConversationId,
-                                    compact: compact)
+                ConversationListItem(conversation: conversation,
+                                     label: extras.label(of: conversation.id),
+                                     showsPin: !(destination == .inbox && !isSearching) && engine.conversationActions.isPinned(conversation.id),
+                                     unreadMark: engine.conversationActions.hasUnreadMark(conversation.id),
+                                     isStranger: destination != .strangers && extras.strangerIds.contains(conversation.id),
+                                     isSelf: conversation.id == engine.selfConversationId,
+                                     compact: compact,
+                                     accent: accent,
+                                     showLabelManager: $showLabelManager)
+                    .equatable()
                     .tag(conversation.id)
                     .listRowInsets(EdgeInsets(top: compact ? 3 : 5, leading: 10, bottom: compact ? 3 : 5, trailing: 10))
                     .listRowSeparator(compact ? .hidden : .automatic)
                     .alignmentGuide(.listRowSeparatorLeading) { _ in 64 }
-                    .modifier(ConversationListSwipeActions(conversation: conversation))
-                    .contextMenu { ConversationActionsMenu(conversationId: conversation.id, preset: .thread, showLabelManager: $showLabelManager) }
             case .strangerBox:
                 StrangerBoxRow(box: extras.strangerBox,
                                newest: extras.strangerBox.newestId.flatMap { id in engine.conversations.first { $0.id == id && !engine.conversationActions.isHidden(id) } }) {
@@ -328,5 +348,33 @@ private struct CreateGroupButton: View {
         .fixedSize()
         .help("Tạo nhóm trò chuyện (⇧⌘N)")
         .accessibilityLabel("Tạo nhóm")
+    }
+}
+
+/// One conversation row with its swipe actions and context menu. Equatable on what it shows, so an update of the list
+/// (another chat's preview, unread count…) re-evaluates only the rows that changed. What the row reads from the engine
+/// itself (typing, mute, action state) still invalidates it through observation.
+private struct ConversationListItem: View, Equatable {
+    let conversation: ZaloEngine.ConversationSummary
+    let label: ConversationExtras.Label?
+    let showsPin: Bool
+    let unreadMark: Bool
+    let isStranger: Bool
+    let isSelf: Bool
+    let compact: Bool
+    let accent: OlazAccent
+    @Binding var showLabelManager: Bool
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.conversation == rhs.conversation && lhs.label == rhs.label && lhs.showsPin == rhs.showsPin
+            && lhs.unreadMark == rhs.unreadMark && lhs.isStranger == rhs.isStranger && lhs.isSelf == rhs.isSelf
+            && lhs.compact == rhs.compact && lhs.accent == rhs.accent
+    }
+
+    var body: some View {
+        ConversationListRow(conversation: conversation, label: label, showsPin: showsPin, unreadMark: unreadMark,
+                            isStranger: isStranger, isSelf: isSelf, compact: compact)
+            .modifier(ConversationListSwipeActions(conversation: conversation, accent: accent))
+            .contextMenu { ConversationActionsMenu(conversationId: conversation.id, preset: .thread, showLabelManager: $showLabelManager) }
     }
 }

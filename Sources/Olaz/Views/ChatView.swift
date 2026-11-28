@@ -127,6 +127,8 @@ struct ChatView: View {
         .cardActionPresenter()
         .messageActionPresenter(conversationId: id)
         .onAppear {
+            // Opening marks the chat read, and the unread change would rebuild the sidebar list while this pane is built.
+            engine.holdListUpdates(for: .milliseconds(700))
             focusTick += 1
             // Saved draft first, then a failed send on top of it: the failed text is always put back (`restoreFailedDraft`).
             restoreSavedDraft(for: id)
@@ -371,6 +373,16 @@ private final class RowCache {
     }
 }
 
+/// The chat pane only shows the conversation's name, avatar, kind, member count and unread count: a new preview (the
+/// most frequent change of a summary) must not rebuild it. `MainShellView` applies `.equatable()`.
+extension ChatView: Equatable {
+    nonisolated static func == (lhs: ChatView, rhs: ChatView) -> Bool {
+        let a = lhs.conversation, b = rhs.conversation
+        return a.id == b.id && a.isGroup == b.isGroup && a.name == b.name && a.avatar == b.avatar
+            && a.pinned == b.pinned && a.members == b.members && a.unread == b.unread
+    }
+}
+
 // MARK: - Message list
 
 private struct MessageList: View {
@@ -391,6 +403,11 @@ private struct MessageList: View {
     /// Within the prefetch band above the oldest loaded row (`olderBand`), not only at the very top.
     @State private var atTop = false
     @State private var nearBottom = true
+    /// The reader is at the newest message and has not scrolled away from it: an older batch landing above, or an image
+    /// growing, keeps the list at the bottom instead of holding the top row (only the reader scrolling changes this).
+    @State private var followsBottom = true
+    /// The reader is dragging / flicking the list (not a programmatic scroll).
+    @State private var userScrolling = false
     @State private var lastContentHeight: CGFloat = 0
     @State private var loadingOlder = false
     @State private var olderTask: Task<Void, Never>?
@@ -423,6 +440,8 @@ private struct MessageList: View {
         let rows = cache.rows(for: msgs)
         let hasMore = engine.hasMoreHistory[id] ?? false
         let newestId = msgs.last?.id
+        let sizeAnchor: UnitPoint? = followsBottom ? .bottom : nil
+        let heldRow = heldRowBinding
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
@@ -465,7 +484,11 @@ private struct MessageList: View {
             }
             // Only the initial offset is anchored; later size changes must not yank the view.
             .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .scrollPosition(id: $topId, anchor: .top)
+            // While the reader stays at the bottom, content growing (images measured, a batch prepended) keeps it there.
+            .defaultScrollAnchor(sizeAnchor, for: .sizeChanges)
+            // While the reader follows the bottom no row is held in place: a batch prepended above would otherwise keep the top
+            // row put and push the newest messages down for a frame before the bottom anchor pulls them back (a visible jerk).
+            .scrollPosition(id: heldRow, anchor: .top)
             .scrollEdgeEffectStyle(.hard, for: .top)
             .scrollEdgeEffectStyle(.soft, for: .bottom)
             .onScrollGeometryChange(for: Metrics.self) { geo in
@@ -489,6 +512,10 @@ private struct MessageList: View {
                     }
                 }
                 if top != atTop { atTop = top }
+                if userScrolling {
+                    let follow = m.fromBottom < 40
+                    if follow != followsBottom { followsBottom = follow }
+                }
                 // Only user scrolling (not content growth) changes "near bottom".
                 if abs(m.content - lastContentHeight) < 1 {
                     let near = m.fromBottom < 160
@@ -508,6 +535,13 @@ private struct MessageList: View {
                 guard let old, let idx = msgs.firstIndex(where: { $0.id == old }), idx > 0 else { return }
                 olderArmed = false
                 landedTop = nil
+                // Opening a chat loads ~15 messages and then prefetches an older batch while the reader is still at the
+                // newest one: stay there (holding the old top row put the view back up at the oldest of the first batch).
+                if followsBottom {
+                    restoreId = nil
+                    proxy.scrollTo("bottom", anchor: .bottom)
+                    return
+                }
                 // A pull saved its row; a prepend nobody asked for keeps the row on screen now (the binding still holds it).
                 let target = ChatRow.restoreTarget(restoreId ?? topId, fallback: old, in: rows)
                 restoreId = nil
@@ -541,7 +575,12 @@ private struct MessageList: View {
             .onAppear {
                 DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) }
             }
-            .onDisappear { olderTask?.cancel() }
+            // The sidebar list is not re-diffed under a scrolling chat: its updates wait for the scroll to come to rest.
+            .onScrollPhaseChange { _, phase in scrollPhaseChanged(phase) }
+            .onDisappear {
+                olderTask?.cancel()
+                engine.setListUpdatesHeldByScroll(false)
+            }
             .environment(\.chatAccentRaw, accentStored)
             .environment(\.chatHasWallpaper, wallpaperStored != ChatWallpaper.none.rawValue)
             .overlay(alignment: .bottomTrailing) {
@@ -562,7 +601,23 @@ private struct MessageList: View {
         }
     }
 
+    /// `topId`, hidden from the scroll view while the reader follows the bottom.
+    private var heldRowBinding: Binding<String?> {
+        Binding(get: { followsBottom ? nil : topId }, set: { topId = $0 })
+    }
+
+    private func scrollPhaseChanged(_ phase: ScrollPhase) {
+        engine.setListUpdatesHeldByScroll(phase != .idle)
+        let byUser: Bool
+        switch phase {
+        case .tracking, .interacting, .decelerating: byUser = true
+        default: byUser = false
+        }
+        if byUser != userScrolling { userScrolling = byUser }
+    }
+
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        followsBottom = true
         withAnimation(.snappy(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
     }
 

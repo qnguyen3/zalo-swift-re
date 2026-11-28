@@ -69,7 +69,17 @@ final class ZaloEngine {
     }
 
     private(set) var phase: Phase = .starting
-    private(set) var conversations: [ConversationSummary] = []
+    /// Published to the views at most every `listUpdateInterval` (and held while a chat scrolls): see ZaloEngine+ListUpdates.swift.
+    /// Engine code that needs the newest rows reads `latestConversations`.
+    internal(set) var conversations: [ConversationSummary] = []
+    // Coalescing of the conversation list and its extras (ZaloEngine+ListUpdates.swift).
+    @ObservationIgnored var pendingConversations: [ConversationSummary]?
+    @ObservationIgnored var pendingExtras: ConversationExtras?
+    @ObservationIgnored var pendingListSince: ContinuousClock.Instant?
+    @ObservationIgnored var lastListFlush: ContinuousClock.Instant?
+    @ObservationIgnored var listHoldUntil: ContinuousClock.Instant?
+    @ObservationIgnored var listHeldByScroll = false
+    @ObservationIgnored var listFlushTask: Task<Void, Never>?
     /// `conversations` by id: the adapter posts only the rows that changed (`reset` replaces everything).
     @ObservationIgnored private var conversationIndex: [String: ConversationSummary] = [:]
     private(set) var profile: Profile?
@@ -311,6 +321,7 @@ final class ZaloEngine {
     private func resetAccountState() {
         profile = nil
         // Conversation list.
+        discardPendingListUpdates()
         conversations = []
         conversationIndex = [:]
         selfConversationId = nil
@@ -558,7 +569,7 @@ final class ZaloEngine {
             for row in rows { index[row.id] = row }
             conversationIndex = index
             let sorted = index.values.sorted(by: Self.listOrder)
-            if sorted != conversations { conversations = sorted }
+            stageConversations(sorted)
             return
         }
         // Delta: only the touched rows are compared, and only rows whose place can change (new, gone, or a different pin /
@@ -582,7 +593,7 @@ final class ZaloEngine {
             }
         }
         guard !drop.isEmpty || !insert.isEmpty || !replace.isEmpty else { return }
-        var list = conversations
+        var list = latestConversations
         if !drop.isEmpty { list.removeAll { drop.contains($0.id) } }
         if !replace.isEmpty {
             for i in list.indices { if let row = replace[list[i].id] { list[i] = row } }
@@ -597,7 +608,7 @@ final class ZaloEngine {
         }
         // Backstop: the list must hold exactly the index (a drift would otherwise stay until the next reset).
         if list.count != conversationIndex.count { list = conversationIndex.values.sorted(by: Self.listOrder) }
-        if list != conversations { conversations = list }
+        stageConversations(list)
     }
 
     /// Whether a row's place in `listOrder` can differ between two versions of it.

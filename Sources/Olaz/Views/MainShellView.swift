@@ -241,6 +241,7 @@ struct ConversationDetail: View {
             }
         } else if let conversation {
             ChatView(conversation: conversation)
+                .equatable()
                 .id(conversation.id)
         } else {
             ContentUnavailableView("Chọn một cuộc trò chuyện", systemImage: "bubble.left.and.bubble.right",

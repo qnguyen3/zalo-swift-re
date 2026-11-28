@@ -345,7 +345,7 @@ extension ZaloEngine {
 
     /// Waits (briefly) for the new conversation to reach the list, then shows it.
     private func openCreatedGroup(_ id: String) async {
-        for _ in 0..<50 where !conversations.contains(where: { $0.id == id }) && !contacts.groups.contains(where: { $0.id == id }) {
+        for _ in 0..<50 where !latestConversations.contains(where: { $0.id == id }) && !contacts.groups.contains(where: { $0.id == id }) {
             try? await Task.sleep(for: .milliseconds(100))
         }
         navigationRequest = id

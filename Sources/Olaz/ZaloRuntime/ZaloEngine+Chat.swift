@@ -125,11 +125,21 @@ extension ZaloEngine {
     private func mergeChat(_ chat: [String: Any], convId: String) {
         let incoming = (chat["messages"] as? [[String: Any]] ?? []).compactMap { Self.chatMessage($0, fallbackConversation: convId) }
         let removed = Set(chat["removed"] as? [String] ?? [])
-        let reset = chat["reset"] as? Bool ?? false
+        var reset = chat["reset"] as? Bool ?? false
         var list = reset ? [] : (messages[convId] ?? [])
+        var needsSort = reset
+        // Re-opening a chat this engine already holds: the adapter resends only its newest window (~15 messages) as a
+        // reset and pages the older ones back in a second later. Replacing the list dropped the older rows and re-added
+        // them (the open chat visibly reloaded). Keep what is older than the window; inside it the reset is authoritative.
+        if reset, let existing = messages[convId], !existing.isEmpty,
+           let oldest = incoming.min(by: { $0.date < $1.date }), existing.contains(where: { $0.id == oldest.id }) {
+            let window = Set(incoming.map(\.id))
+            list = existing.filter { $0.date < oldest.date || window.contains($0.id) }
+            reset = false
+            needsSort = true
+        }
         if !removed.isEmpty { list.removeAll { removed.contains($0.id) } }
         var index = list.enumerated().reduce(into: [String: Int]()) { $0[$1.element.id] = $1.offset }
-        var needsSort = reset
         for message in incoming {
             if let at = index[message.id] {
                 if list[at].date != message.date { needsSort = true }
@@ -145,7 +155,13 @@ extension ZaloEngine {
             list = list.enumerated().sorted { ($0.element.date, $0.offset) < ($1.element.date, $1.offset) }.map(\.element)
         }
         EngineLog.shared.write("chat merge conv=\(convId.prefix(4))… reset=\(reset) in=\(incoming.count) removed=\(removed.count) total=\(list.count) hasMore=\(chat["hasMore"] ?? "-")")
-        if messages[convId] != list { messages[convId] = list }
+        if messages[convId] != list {
+            messages[convId] = list
+        } else if incoming.count > 5 {
+            // A page of messages this list already holds (an older batch re-sent after a re-open): report the pull as done
+            // so the message list stops waiting and asks for the next page if the reader is still at the top.
+            historyTicks[convId, default: 0] += 1
+        }
         notePollMessages(incoming)
         if let hasMore = chat["hasMore"] as? Bool, hasMoreHistory[convId] != hasMore { hasMoreHistory[convId] = hasMore }
         if chat["grew"] as? Bool == true { historyTicks[convId, default: 0] += 1 }
