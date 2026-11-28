@@ -75,6 +75,65 @@ var webkit = { messageHandlers: { zstate: { postMessage: function (s) { posts.pu
         #expect(h.text("JSON.stringify(posts.map(function (p) { return p.chat.removed; }))") == #"[["902"]]"#)
     }
 
+    /// History pool `pool` (ids 900…1029, oldest first, one second apart); the official window is its tail. `_loadMoreMessages`
+    /// prepends the next 15 from the pool, like the official loader.
+    private func historyHarness(window: Int) -> ScriptHarness {
+        let h = harness()
+        h.ctx.evaluateScript("""
+        var pool = []; for (var i = 0; i < 130; i++) pool.push(text(String(900 + i), i % 2 ? 'u2' : '0', { sendDttm: NOW - (200 - i) * 1000 }));
+        var shown = \(window), loadCalls = 0;
+        convs.u2 = { messages: pool.slice(pool.length - shown), msgList: { hasMoreLocal: true } };
+        chat.chatboxController._loadMoreMessages = async function () {
+          loadCalls++; shown = Math.min(pool.length, shown + 15);
+          var page = pool.slice(pool.length - shown, pool.length - shown + 15);
+          replace(pool.slice(pool.length - shown)); return page;
+        };
+        var chatPosts = function () { return posts.filter(function (p) { return p.chat; }); };
+        """)
+        _ = h.runUntilSettled("open", "window.__zaloChat.open('u2')", step: 200)
+        settle(h)
+        return h
+    }
+
+    @Test func anOfficialTrimKeepsTheRowsSwiftShowsButADeletionIsReported() {
+        let h = historyHarness(window: 30)
+        // The hidden chat box drops all but the newest 5: nothing is reported removed.
+        h.ctx.evaluateScript("posts = []; replace(convs.u2.messages.slice(25));")
+        settle(h)
+        #expect(h.failures.isEmpty, "\(h.failures)")
+        #expect(h.number("chatPosts().filter(function (p) { return p.chat.removed.length; }).length") == 0)
+        // Two messages deleted from the middle: reported.
+        h.ctx.evaluateScript("posts = []; replace(convs.u2.messages.filter(function (m, i) { return i !== 1 && i !== 2; }));")
+        settle(h)
+        #expect(h.number("chatPosts().reduce(function (n, p) { return n + p.chat.removed.length; }, 0)") == 2)
+    }
+
+    @Test func onePullFetchesPagesUntilEnoughOlderMessagesAndPostsThemTogether() {
+        let h = historyHarness(window: 20)
+        h.ctx.evaluateScript("posts = [];")
+        _ = h.runUntilSettled("pull", "window.__zaloChat.loadMore('u2')", step: 100)
+        settle(h)
+        #expect(h.failures.isEmpty, "\(h.failures)")
+        #expect(h.number("loadCalls") == 3)
+        #expect(h.number("chatPosts().length") == 1)
+        #expect(h.number("chatPosts()[0].chat.messages.length") == 45)
+        #expect(h.text("String(chatPosts()[0].chat.grew)") == "true")
+    }
+
+    @Test func aPullAfterATrimRefetchesTheKeptRowsBeforeCountingOlderOnes() {
+        let h = historyHarness(window: 30)
+        h.ctx.evaluateScript("replace(convs.u2.messages.slice(25)); shown = 5;")
+        settle(h)
+        h.ctx.evaluateScript("posts = [];")
+        _ = h.runUntilSettled("pull", "window.__zaloChat.loadMore('u2')", step: 100)
+        settle(h)
+        #expect(h.failures.isEmpty, "\(h.failures)")
+        // 25 kept rows come back first (2 pages, the second already 5 older), then 3 pages more: 50 older than the floor.
+        #expect(h.number("loadCalls") == 5)
+        #expect(h.number("chatPosts().reduce(function (n, p) { return n + p.chat.removed.length; }, 0)") == 0)
+        #expect(h.text("String(chatPosts().some(function (p) { return p.chat.grew; }))") == "true")
+    }
+
     @Test func reactionsElsewhereDoNotFlushTheOpenConversation() {
         let h = harness()
         _ = h.runUntilSettled("open", "window.__zaloChat.open('u2')", step: 200)
@@ -95,9 +154,10 @@ var webkit = { messageHandlers: { zstate: { postMessage: function (s) { posts.pu
 @Suite struct ConversationListDeltaScriptTests {
     private func harness() -> ScriptHarness {
         let h = ScriptHarness(prelude: postsPrelude + """
-        var __intervals = [];
+        var __intervals = [], __now = Date.now();
+        Date.now = function () { return __now; };
         setInterval = function (f) { __intervals.push(f); return __intervals.length; };
-        var runIntervals = function () { __intervals.forEach(function (f) { f(); }); };
+        var runIntervals = function () { __now += 4600; __intervals.forEach(function (f) { f(); }); };
         var document = { body: {} };
         var previews = new Map(), convs = new Map(), unread = new Map(), formatCalls = 0;
         var io = { getFriendManagerModule: async function () { return { default: { getDName: function (id) { return 'Bạn ' + id; }, getAvatar: function (id) { return 'https://a/' + id; } } }; }, getGroupManagerModule: async function () { return { default: { getDName: function (id) { return 'Nhóm ' + id; }, getAvatarGroup: function () { return ''; }, getTotalMember: function () { return 3; } } }; } };
@@ -118,7 +178,7 @@ var webkit = { messageHandlers: { zstate: { postMessage: function (s) { posts.pu
         return h
     }
 
-    /// One publish tick: the 1.5 s interval runs and its promise settles.
+    /// One publish tick: 4.6 s pass (past the safety tick's 4.5 s, short of the 20 s preview memo), the interval runs and its promise settles.
     private func tick(_ h: ScriptHarness) {
         h.ctx.evaluateScript("runIntervals();")
         h.pump(steps: 2, step: 10)

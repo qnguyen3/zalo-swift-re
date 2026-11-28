@@ -116,12 +116,15 @@ final class ShellModel {
     private(set) var searchFocusTick = 0
     /// Reply to the last incoming message of the open chat (⌘R).
     private(set) var replyTick = 0
+    /// Open / focus the search inside the open chat (⇧⌘F).
+    private(set) var chatSearchTick = 0
 
     func focusSearch() { searchFocusTick += 1 }
 
     /// Shows the "Tạo nhóm" sheet with `members` already picked.
     func composeGroup(with members: [String] = []) { groupCompose = GroupComposeRequest(members: members) }
     func replyToLatest() { replyTick += 1 }
+    func findInChat() { chatSearchTick += 1 }
 
     /// Shows a conversation: keeps the current list when it is a conversation list, otherwise goes to the inbox.
     func open(conversation id: String) {

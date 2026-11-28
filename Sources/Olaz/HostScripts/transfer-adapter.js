@@ -282,18 +282,23 @@
   // Manual start availability: exactly the guards of the official Settings card
   // (Cai dat > Sao luu & dong bo > "Dong bo tin nhan"): feature on for SETTING, no data migration,
   // no sync running, module.canSync(SETTING) === OK (also covers WORKER_NOT_READY / mobile unsupported).
+  // The process manager (DI singleton with getActiveProcesses), kept once found: a DI scan costs tens of ms and this runs on
+  // every 1.5 s tick. While it is missing, rescan at most every 30 s.
+  let procMgr = null, procScan = 0;
+  const processManager = () => {
+    if (procMgr || Date.now() - procScan < 30000) return procMgr;
+    procScan = Date.now();
+    for (const r of safe(() => window.__zaloDI(window.__zaloRequire), [])) {
+      const i = r && r.instance;
+      if (i && typeof i === 'object' && typeof i.getActiveProcesses === 'function') { procMgr = i; break; }
+    }
+    return procMgr;
+  };
   const availability = () => {
     const okCode = enums.canSync ? enums.canSync.OK : 0;
     const why = (code) => (enums.canSync && enums.canSync[code]) || ('CODE_' + code);
-    const regs = window.__zaloDI(window.__zaloRequire);
-    let migrating = false;
-    for (const r of regs) {
-      const i = r.instance;
-      if (i && typeof i === 'object' && typeof i.getActiveProcesses === 'function') {
-        migrating = !!safe(() => i.getActiveProcesses().some((p) => p.kind === 'db-migrate'), false);
-        break;
-      }
-    }
+    const pm = processManager();
+    const migrating = !!(pm && safe(() => pm.getActiveProcesses().some((p) => p.kind === 'db-migrate'), false));
     if (migrating) return { canStart: false, reason: 'DB_MIGRATING' };
     if (v2()) {
       if (!safe(() => m2.isFeatureEnabledBySyncSource(SOURCE_SETTING), false)) return { canStart: false, reason: 'DISABLED' };
@@ -501,18 +506,21 @@
     state() { return safe(compute, null); },
   };
 
-  // The renderer boots asynchronously; wait for the DI container + services.
-  let tries = 0;
+  // The renderer boots asynchronously; wait for the DI container + services. An attempt scans the whole DI container (and the
+  // module exports once the services are there), tens of ms each, and the sync services may only appear later: 500 ms for the
+  // first 30 s, then 2 s until 5 minutes, then 10 s. Never gives up, so a sync started late is still bridged.
+  let tries = 0, warned = false;
+  const bootStart = Date.now();
   const boot = () => {
     if (!window.__zaloRequire || !window.__zaloDI || !window.__zaloEachExport) return false;
     return safe(install, false) === true;
   };
-  const t = setInterval(() => {
+  const attempt = () => {
     tries++;
-    if (boot()) { clearInterval(t); return; }
-    if (tries > 600) {
-      clearInterval(t);
-      diag('gave up installing after ' + tries + ' attempts' + (missingEnums ? ' (missing enums: ' + missingEnums + ')' : ' (services not found)'));
-    }
-  }, 500);
+    if (boot()) return;
+    const age = Date.now() - bootStart;
+    if (!warned && age >= 300000) { warned = true; diag('still not installed after ' + tries + ' attempts' + (missingEnums ? ' (missing enums: ' + missingEnums + ')' : ' (services not found)')); }
+    setTimeout(attempt, age < 30000 ? 500 : age < 300000 ? 2000 : 10000);
+  };
+  setTimeout(attempt, 500);
 })();

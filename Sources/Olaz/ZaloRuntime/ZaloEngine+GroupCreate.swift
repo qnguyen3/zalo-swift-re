@@ -311,8 +311,11 @@ extension ZaloEngine {
     func createGroup(name: String, members: [String], avatar: GroupAvatarImage?) async -> GroupCreateOutcome {
         var input: [String: Any] = ["name": name, "members": members]
         if let avatar { input["avatar"] = ["data": avatar.base64, "width": avatar.side, "height": avatar.side] }
+        guard host != nil else { return .failed(title: nil, message: GroupCreateOutcome.notReadyText) }   // nothing was started
         let answer = await raceTimeout(45) { [self] in JSBox(value: await evaluateGroupCreate("create", [input])) }
-        let outcome = answer.map { GroupCreateOutcome(json: $0.value) } ?? .pending(GroupCreateOutcome.noAnswerText)
+        // No answer in time, or none at all (the call threw: page reloaded mid-create) → the group may exist: pending, never a
+        // failure that invites a retry into a duplicate group.
+        let outcome = answer?.value.map { GroupCreateOutcome(json: $0) } ?? .pending(GroupCreateOutcome.noAnswerText)
         EngineLog.shared.write("group create → \(outcome.logName)")
         switch outcome {
         case .created(let id, let failed):
@@ -342,7 +345,7 @@ extension ZaloEngine {
 
     /// Waits (briefly) for the new conversation to reach the list, then shows it.
     private func openCreatedGroup(_ id: String) async {
-        for _ in 0..<50 where !conversations.contains(where: { $0.id == id }) && !contacts.groups.contains(where: { $0.id == id }) {
+        for _ in 0..<50 where !latestConversations.contains(where: { $0.id == id }) && !contacts.groups.contains(where: { $0.id == id }) {
             try? await Task.sleep(for: .milliseconds(100))
         }
         navigationRequest = id

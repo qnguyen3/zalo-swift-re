@@ -65,13 +65,13 @@
 //         e-card actions, info-message links, "GỌI LẠI" of a call log; `stickers` = the card offers its suggested stickers.
 //         Run with `performAction(convId, msgId, ref)` — see card-actions-adapter.js for the official handlers.)
 //         Cards the official client draws nothing for (ECARD type "7", notices without text), and the onboarding e-card, are not emitted.
-//     quote: {senderName, text} | null,
+//     quote: {senderName, text, msgId, cliMsgId} | null,   (ids of the quoted message, '' when unknown)
 //     reactions: [{type, key, emoji, image, count, includesMe, names (≤3, cached; me first as "Bạn"), people (distinct reactors)}],
 //     mentions: [{uid, pos, len, isAll}]   // official message.mentions (pos/len are UTF-16 offsets into text)
 //     isE2EE,
 //     menu: {forward, recall, delete, pin, star, starred, protected, pinned} | null   (message-actions-adapter.js `describe`) }
 //   * id: my own messages use the client message id (stable from pending to sent); others use
-//     the server msgId. send/react/quote accept either form.
+//     the server msgId. altId: the other one ('' when unknown). send/react/quote accept either form.
 //   * text: caption / body; non-text kinds without a caption carry the official preview text (`getPlainText`,
 //     lang_vi.json) such as "[Hình ảnh]", "[Danh thiếp] <tên>", "[Thiệp]", "[Bình chọn] <câu hỏi>".
 //   * quote.text follows the official quote banner (`cliMsgType` + `attach`).
@@ -157,7 +157,7 @@
       Promise.all([S.io.getFriendManagerModule(), S.io.getGroupManagerModule()]).then(([f, g]) => {
         S.friends = f.default || f; S.groups = g.default || g;
         track.nameRetries = 0; remapAll();
-      }).catch((e) => { S.modulesLoading = false; diag('friend/group modules: ' + e); });
+      }).catch((e) => { S.modulesLoading = false; diag('friend/group modules: ' + scrubErr(e)); });
     }
     hookTyping();
     hookReactions();
@@ -399,12 +399,15 @@
   };
 
   // Reminder inside an e-card (`getDataReminder`, offset ~19984473): params.actions = [{actionId:'action.open.reminder', data: JSON}];
-  // data {startTime (ms), msg (quoted title), params{title}, repeat 0 once / 1 daily / 2 weekly / 3 monthly}.
+  // The reminder itself is one level deeper, a JSON string in `data.data` (official `getMsgInfoUIReminderv2` parses `dataReminder.data`):
+  // {startTime (ms), msg (quoted title), params{title}, repeat 0 once / 1 daily / 2 weekly / 3 monthly}. Top-level fields are the fallback.
   const reminderOf = (o, p) => {
     const acts = p && Array.isArray(p.actions) ? p.actions : null;
     if (!acts || acts.length !== 1 || !acts[0] || acts[0].actionId !== 'action.open.reminder' || typeof acts[0].data !== 'string') return null;
-    const d = parseJSON(acts[0].data);
-    if (!Object.keys(d).length) return null;
+    const outer = parseJSON(acts[0].data);
+    if (!Object.keys(outer).length) return null;
+    const inner = parseJSON(outer.data);
+    const d = Object.keys(inner).length ? inner : outer;
     const dp = parseJSON(d.params);
     let title = typeof d.msg === 'string' && d.msg.length > 2 ? d.msg.slice(1, d.msg.length - 1) : '';
     title = title || str(dp.title);
@@ -635,7 +638,11 @@
     const mine = owner === '0' || owner === meNow();
     let text = safe(() => quoteText(q), '') || '';
     if (!text) text = str(q.attach) ? FALLBACK.photo : FALLBACK.unsupported;
-    return { senderName: str(q.fromD) || (mine ? myName() : nameOf(owner)) || '', text: text.slice(0, 200) };
+    // globalMsgId = the quoted message's server id, cliMsgId = its client id (Swift matches either against row ids).
+    // globalMsgId 0 means unknown (the official client then falls back to msgId).
+    const g = String(q.globalMsgId ?? ''), msgId = g && g !== '0' ? g : String(q.msgId ?? ''), cliMsgId = String(q.cliMsgId ?? '');
+    return { senderName: str(q.fromD) || (mine ? myName() : nameOf(owner)) || '', text: text.slice(0, 200),
+             msgId: msgId === '0' ? '' : msgId, cliMsgId: cliMsgId === '0' ? '' : cliMsgId };
   };
 
   // Official message.mentions: [{uid, pos, len, type}] (type 0 user / 1 all, uid '-1' = all).
@@ -719,6 +726,8 @@
     });
   };
 
+  // Send time in ms (some payloads carry seconds).
+  const msgTs = (m) => { const ts = num(m.sendDttm || m.serverTime || m.ts || m.localDttm); return ts && ts < 1e12 ? ts * 1000 : ts; };
   const mapOne = (m, convId, idOverride) => {
     const fromUid = String(m.fromUid ?? m.uidFrom ?? '');
     const mine = fromUid === '0' || (!!meNow() && fromUid === meNow());
@@ -726,6 +735,8 @@
     const validCli = cli && cli !== '0' && cli !== 'undefined';
     const server = String(m.msgId ?? '');
     const id = idOverride || (mine ? (validCli ? cli : server) : (!isFakeId(server) ? server : cli));
+    // The other id, so a quote that carries only one of them (image quotes have globalMsgId 0) still finds the row.
+    const alt = idOverride ? '' : [validCli ? cli : '', !isFakeId(server) ? server : ''].find((x) => x && x !== id) || '';
     const sender = mine ? meNow() : fromUid;
     let content;
     try { content = mapContent(m, convId); } catch (e) {
@@ -734,14 +745,13 @@
     }
     const { kind, text } = content;
     if (!kind) return null; // a card the official client draws nothing for
-    let ts = num(m.sendDttm || m.serverTime || m.ts || m.localDttm);
-    if (ts && ts < 1e12) ts *= 1000;
+    const ts = msgTs(m);
     // Card buttons (card-actions-adapter.js): {buttons:[{ref,label,enabled,help}], stickers:bool} merged into the message.
     const cardExtra = safe(() => (window.__zaloCardActions ? window.__zaloCardActions.describe(m, convId, kind) : null), null);
     // Context-menu actions (message-actions-adapter.js): forward / recall / delete / pin / star, with the starred and pinned state.
     const menu = safe(() => (window.__zaloMsgActions ? window.__zaloMsgActions.describe(m, convId) : null), null);
     return Object.assign({
-      id, conversationId: convId, senderId: sender,
+      id, altId: alt, conversationId: convId, senderId: sender,
       senderName: mine ? myName() : (str(m.dName) || nameOf(fromUid)),
       senderAvatar: mine ? myAvatar() : avatarOf(fromUid),
       isMine: mine, kind, text, date: ts, status: mapStatus(m, mine),
@@ -876,11 +886,21 @@
         try { if (conId && result) post({ page: 'main', typing: { convId: String(conId), name: '' } }); } catch {}
         return result;
       };
-    } catch (e) { hookedTyping = false; diag('typing hook: ' + (e && e.message || e)); }
+    } catch (e) { hookedTyping = false; diag('typing hook: ' + scrubErr(e)); }
   };
 
   // ---- state publishing ----
-  const track = { id: null, lastMessages: null, lastList: null, sigs: new Map(), exhausted: false, lastHasMore: null, noGrowth: 0, nameRetries: 0, needsNames: false, reactionScan: null, serverIds: new Set(), fullAt: 0 };
+  // `dates`: send time of every posted row (trim detection). `floor`: oldest send time Swift holds for this chat, kept
+  // across official trims. `holdUntil`: a pull posts its pages together instead of one prepend per page. `pullDone`: the
+  // next post tells Swift a pull finished even when nothing new reached it (`grew`, so it may ask again).
+  const track = { id: null, lastMessages: null, lastList: null, sigs: new Map(), dates: new Map(), floor: Infinity, exhausted: false, lastHasMore: null, noGrowth: 0, nameRetries: 0, needsNames: false, reactionScan: null, serverIds: new Set(), fullAt: 0, pulling: false, holdUntil: 0, pullDone: false };
+  // The hidden official chat box always "sits at the bottom", so a new message makes it drop everything but the newest
+  // ~20 messages. Swift keeps what it already shows: a run of at least this many oldest rows leaving at once is a trim,
+  // not a deletion.
+  const TRIM_MIN = 10;
+  // One pull from the top fetches official pages (15 messages each) until this many messages older than Swift's floor.
+  const PULL_TARGET = 45;
+  const PULL_PAGES = 40, PULL_MS = 25000, PULL_HOLD_MS = 2500;
   let dirty = false, timer = null, forceReset = false;
   // `dirty`: a flush is due (the memoised rows stay valid); `remap`: every message is mapped again (state outside the
   // messages changed: names, pins, the conversation's flags).
@@ -902,6 +922,8 @@
   const flush = () => {
     const id = track.id;
     if (!id) return;
+    const wait = track.holdUntil - Date.now();
+    if (wait > 0) { if (!timer) timer = setTimeout(() => { timer = null; flush(); }, wait + 10); return; }
     resolveServices();
     meId = myId();
     const conv = convOf(id);
@@ -909,7 +931,7 @@
     const messages = conv.messages || [];
     // An empty list while the official load is still in flight is not the truth yet; don't clear the UI.
     if (forceReset && !messages.length && openingId === id) return;
-    if (!dirty && !forceReset && messages === track.lastMessages && conv.msgList === track.lastList) return;
+    if (!dirty && !forceReset && !track.pullDone && messages === track.lastMessages && conv.msgList === track.lastList) return;
     // Everything is mapped again on an explicit refresh, and at least every FULL_MAP_MS on a tick, so what a card or a
     // name shows from state outside the message (a friend request accepted elsewhere, a renamed contact) catches up.
     const now = Date.now();
@@ -931,25 +953,38 @@
     if (forceReset) {
       forceReset = false;
       track.sigs = new Map(entries.map((e) => [e.row.id, e.sig]));
+      track.dates = new Map(entries.map((e) => [e.row.id, e.row.date]));
+      track.floor = entries.reduce((t, e) => (e.row.date && e.row.date < t ? e.row.date : t), Infinity);
+      track.pullDone = false;
       track.lastHasMore = hasMore;
       track.lastRaw = messages.length;
       post({ page: 'main', chat: { convId: id, messages: mapped, removed: [], hasMore, reset: true } });
       return;
     }
-    const next = new Map();
+    const next = new Map(), dates = new Map();
     const changed = [];
+    let oldest = Infinity;
     for (const e of entries) {
       next.set(e.row.id, e.sig);
+      dates.set(e.row.id, e.row.date);
+      if (e.row.date && e.row.date < oldest) oldest = e.row.date;
+      if (e.row.date && e.row.date < track.floor) track.floor = e.row.date;
       if (track.sigs.get(e.row.id) !== e.sig) changed.push(e.row);
     }
-    const removed = [...track.sigs.keys()].filter((k) => !next.has(k));
-    track.sigs = next;
+    let removed = [...track.sigs.keys()].filter((k) => !next.has(k));
+    if (removed.length >= TRIM_MIN && oldest !== Infinity && removed.every((k) => (track.dates.get(k) || 0) < oldest)) {
+      diag('trim kept ' + removed.length);
+      removed = [];
+    }
+    track.sigs = next; track.dates = dates;
+    const pulled = track.pullDone;
+    track.pullDone = false;
     // Official messages that map to nothing (hidden cards) still count as growth: Swift must learn that an older page arrived.
     const grew = messages.length > (track.lastRaw || 0);
     track.lastRaw = messages.length;
-    if (!changed.length && !removed.length && hasMore === track.lastHasMore && !grew) return;
+    if (!changed.length && !removed.length && hasMore === track.lastHasMore && !grew && !pulled) return;
     track.lastHasMore = hasMore;
-    post({ page: 'main', chat: { convId: id, messages: changed, removed, hasMore, reset: false, grew: grew && !changed.length && !removed.length } });
+    post({ page: 'main', chat: { convId: id, messages: changed, removed, hasMore, reset: false, grew: pulled || (grew && !changed.length && !removed.length) } });
   };
 
   let subscribed = false;
@@ -1053,12 +1088,23 @@
     return 'sent';
   };
   let sendChain = Promise.resolve();
-  // One send at a time through the controller (text, attachments, cards).
+  // One send at a time through the controller (text, attachments, cards). A step that has not settled after STEP_MS (an
+  // official call that never answers) releases the chain so later sends are not blocked; its own promise is left as it is.
+  const STEP_MS = 60000;
   const serial = (fn) => {
-    const run = sendChain.then(fn);
-    sendChain = run.catch(() => {});
+    const prev = sendChain;
+    const run = prev.then(fn);
+    // The cap counts from when the step starts (the previous one released), not from when it was queued.
+    sendChain = prev.then(() => new Promise((release) => {
+      let done = false;
+      const go = () => { if (!done) { done = true; release(); } };
+      run.then(go, go);
+      setTimeout(() => { if (!done) { diag('send step still running after ' + STEP_MS / 1000 + ' s: chain released'); go(); } }, STEP_MS);
+    }));
     return run;
   };
+  // An official call that may never settle, capped: rejects with a 'timeout' error after `ms`.
+  const within = (p, ms, what) => Promise.race([Promise.resolve(p), sleep(ms).then(() => { throw new Error('timeout ' + what); })]);
   const refresh = () => remapAll();
 
   // Official ZTagNameHelper registry (found once in the module cache); SRC_GET_PROFILE comes from `scanModules`.
@@ -1211,7 +1257,7 @@
       } else {
         cands = loc.d([loc.b.ThumbUrl], msg);
       }
-    } catch (e) { diag('resolveMedia candidates: ' + (e && e.message || e)); }
+    } catch (e) { diag('resolveMedia candidates: ' + scrubErr(e)); }
     cands = cands.filter((c) => c && c.url);
     if (!cands.length) return done('unavailable', { reason: 'no-source' });
     // 1. A copy the official client already stored.
@@ -1243,7 +1289,7 @@
       resolveMediaNow(convId, msgId, kind),
       // A whole video downloads (and decrypts) before it plays.
       sleep(kind === 'video' ? 600000 : 60000).then(() => ({ state: 'unavailable', reason: 'timeout' })),
-    ]).catch((e) => { diag('resolveMedia ' + (e && e.message || e)); return { state: 'unavailable', reason: 'error' }; })
+    ]).catch((e) => { diag('resolveMedia ' + scrubErr(e)); return { state: 'unavailable', reason: 'error' }; })
       .finally(() => { mediaFlights.delete(key); });
     mediaFlights.set(key, flight);
     return flight;
@@ -1261,59 +1307,103 @@
       if (track.id && switched) deactivate(track.id);
       if (switched) { reactionsById.clear(); reactionFetched.clear(); }
       track.id = convId; track.exhausted = false; track.noGrowth = 0; track.nameRetries = 0; track.needsNames = false;
-      track.lastMessages = null; track.lastList = null; track.sigs = new Map(); track.reactionScan = null; track.serverIds = new Set();
+      track.lastMessages = null; track.lastList = null; track.sigs = new Map(); track.dates = new Map(); track.floor = Infinity; track.reactionScan = null; track.serverIds = new Set();
+      track.pulling = false; track.holdUntil = 0; track.pullDone = false;
       forceReset = true; dirty = true;
       schedule();
       try {
         const cc = controller();
-        if (!cc || cc.convId !== convId || switched) await S.opener.openConversation(convId);
+        if (!cc || cc.convId !== convId || switched) await within(S.opener.openConversation(convId), 20000, 'openConversation');
         if (stale()) return;
         const settled = await waitFor(() => !stale() && convOf(convId) && controller() && controller().convId === convId, 1500);
         if (!settled && !stale()) repairController(convId, true);
         else if (settled) noteBoxFields(controller());
         if (stale()) return;
-        await S.loader.getLastMessagesForConversation(convId, {});
+        await within(S.loader.getLastMessagesForConversation(convId, {}), 30000, 'getLastMessages');
         if (stale()) { deactivate(convId); return; }
         // The chat view marks its loader active so the official in-memory message cache follows the conversation.
         safe(() => S.loader.cacheMessageLoader.get(convId).active(), null);
-      } catch (e) { diag('open ' + (e && e.message || e)); }
-      if (!stale()) { openingId = null; remapAll(); }
+      } catch (e) { diag('open ' + scrubErr(e)); }
+      finally {
+        // Every exit lets go of `openingId` unless a newer open / close owns it now (stale).
+        if (!stale()) openingId = null;
+      }
+      if (!stale()) remapAll();
     },
     async close(convId) {
       convId = String(convId);
       if (track.id === convId || openingId === convId) { openSeq++; openingId = null; }
       if (track.id === convId) track.id = null;
       deactivate(convId);
-      try { if (S.opener) await S.opener.closeConversation(convId); } catch (e) { diag('close ' + (e && e.message || e)); }
+      try { if (S.opener) await S.opener.closeConversation(convId); } catch (e) { diag('close ' + scrubErr(e)); }
     },
+    // One pull from the top: official pages until PULL_TARGET messages older than what Swift holds (after a trim the
+    // first pages only re-fetch what Swift kept), posted together, then a `grew` post so Swift can pull again.
     async loadMore(convId) {
       convId = String(convId);
-      if (!(await ready())) return;
+      if (track.pulling && track.id === convId) return;
+      // Every pull that does not run still tells Swift it is over (`grew`), or its spinner — and the next pull — would
+      // wait for its timeout. Delayed, so a chat that cannot pull right now is not asked again in a tight loop.
+      const giveUp = (why) => {
+        diag('loadMore: ' + why);
+        setTimeout(() => { if (track.id === convId && !track.pulling) { track.pullDone = true; dirty = true; schedule(); } }, 1500);
+      };
+      if (!(await ready())) return giveUp('not ready');
       const conv = convOf(convId);
       let cc = controller();
       if (conv && track.id === convId && (!cc || cc.convId !== convId) && repairController(convId)) cc = controller();
-      if (!conv || !cc || cc.convId !== convId || track.id !== convId) { diag('loadMore: conversation not open'); return; }
+      if (!conv || !cc || cc.convId !== convId || track.id !== convId) return giveUp('conversation not open');
       const loading = () => { const ml = (convOf(convId) || {}).msgList || {}; return !!(ml.isLoadingMessageTop || ml.isLoadingMessage); };
-      if (loading()) return;
-      const count = () => ((convOf(convId) || {}).messages || []).length;
-      const before = count();
-      let loaded = null;
-      try {
-        const res = await cc._loadMoreMessages();
-        if (Array.isArray(res)) loaded = res.length;
-      } catch (e) { diag('loadMore ' + (e && e.message || e)); }
-      await waitFor(() => !loading(), 15000);
-      await sleep(100);
-      if (track.id !== convId) return;
-      const grew = count() > before || (loaded || 0) > 0;
-      if (grew) track.noGrowth = 0;
-      else {
-        // Only give up when the official flags agree, or after repeated empty pages.
-        const ml = (convOf(convId) || {}).msgList || {};
-        const officialDone = ml.hasMoreLocal === false && (ml.hasMoreCloud === false || ml.hasMoreCloud === 0 || ml.hasMoreCloud === undefined);
-        if (officialDone || ++track.noGrowth >= 2) track.exhausted = true;
+      // The official client is already loading (its own open / jump): wait for it and pull after it, instead of dropping
+      // the request.
+      if (loading()) {
+        track.pulling = true;
+        await waitFor(() => !loading(), 15000);
+        track.pulling = false;
+        if (track.id !== convId) return;
+        if (loading()) return giveUp('official load still running');
       }
-      dirty = true; schedule();
+      const list = () => (convOf(convId) || {}).messages || [];
+      const floor = list().reduce((t, m) => { const ts = msgTs(m); return ts && ts < t ? ts : t; }, track.floor);
+      const older = () => list().reduce((n, m) => n + ((msgTs(m) || Infinity) < floor ? 1 : 0), 0);
+      const start = Date.now();
+      track.pulling = true;
+      track.holdUntil = start + PULL_HOLD_MS;
+      let pages = 0;
+      try {
+        while (pages < PULL_PAGES && Date.now() - start < PULL_MS && track.id === convId && !track.exhausted) {
+          const before = list().length;
+          let loaded = null, failed = false;
+          try {
+            cc = controller();
+            if (!cc || cc.convId !== convId) break;
+            const res = await cc._loadMoreMessages();
+            if (Array.isArray(res)) loaded = res.length;
+          } catch (e) { diag('loadMore ' + scrubErr(e)); failed = true; }
+          await waitFor(() => !loading(), 15000);
+          await sleep(60);
+          pages++;
+          if (track.id !== convId) return;
+          const grew = list().length > before || (loaded || 0) > 0;
+          // A failed page (network, server) is not the end of the history: stop this pull, let the next one try again.
+          if (failed && !grew) break;
+          if (grew) track.noGrowth = 0;
+          else {
+            // Only give up when the official flags agree, or after repeated empty pages.
+            const ml = (convOf(convId) || {}).msgList || {};
+            const officialDone = ml.hasMoreLocal === false && (ml.hasMoreCloud === false || ml.hasMoreCloud === 0 || ml.hasMoreCloud === undefined);
+            if (officialDone || ++track.noGrowth >= 2) track.exhausted = true;
+          }
+          if (older() >= PULL_TARGET) break;
+        }
+      } finally {
+        if (track.id === convId) {
+          diag('pull pages=' + pages + ' older=' + older() + ' ms=' + (Date.now() - start));
+          track.pulling = false; track.holdUntil = 0; track.pullDone = true;
+          if (timer) { clearTimeout(timer); timer = null; }
+          dirty = true; schedule();
+        }
+      }
     },
     // Sends share the controller's quote banner: run them one at a time.
     sendText(convId, text, quoteMsgId, mentions) { return serial(() => doSendText(convId, text, quoteMsgId, mentions)); },
@@ -1336,7 +1426,7 @@
           const isAll = !!x.isMentionAll || String(x.id) === '-1';
           return { id: String(x.id), name: isAll ? 'All' : (str(x.dName) || nameOf(String(x.id))), avatar: isAll ? '' : (avatarOf(String(x.id)) || str(x.avatar)), isAll };
         });
-      } catch (e) { diag('mentionCandidates ' + (e && e.message || e)); return []; }
+      } catch (e) { diag('mentionCandidates ' + scrubErr(e)); return []; }
     },
     // Who reacted to a message ("Biểu cảm" popup): the official reacted list (`{uid:{rType:count}}`) with the
     // popup's own tab / row ordering. Unknown profiles are fetched like module "7itQ" `b(uids)` does
@@ -1403,7 +1493,7 @@
       await waitFor(() => controller() && controller().convId === convId, 3000);
       const cc = controller();
       if (!cc || cc.convId !== convId) return;
-      try { await cc.readMessageOfConv(convId); } catch (e) { diag('markRead ' + (e && e.message || e)); }
+      try { await cc.readMessageOfConv(convId); } catch (e) { diag('markRead ' + scrubErr(e)); }
     },
     async react(convId, msgId, emoji) {
       convId = String(convId);
@@ -1417,7 +1507,7 @@
         S.reactSender.sendReaction(convId, reaction, clientId, target);
         const rec = S.reactCache.generateReactMsg(convId, reaction, clientId, target);
         S.reactCache.onReceiveReactions({ [rec.rMsgId]: rec }, () => {}, 'msg.sendReaction');
-      } catch (e) { diag('react ' + (e && e.message || e)); }
+      } catch (e) { diag('react ' + scrubErr(e)); }
       reactionFetched.delete(String(target.msgId));
       setTimeout(() => { fetchReactions([String(target.msgId)]); }, 500);
     },

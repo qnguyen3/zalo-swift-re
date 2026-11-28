@@ -9,6 +9,15 @@
   window.__zaloStateAdapter = true;
   const post = (state) => { try { window.webkit.messageHandlers.zstate.postMessage(state); } catch {} };
   const diag = (s) => { try { window.webkit.messageHandlers.zlog.postMessage('[adapter] ' + s); } catch {} };
+  // Errors into the host log: name + message with links and long numbers (ids, phone numbers) masked, as chat-adapter.js
+  // `scrubErr`; a non-Error rejection gives only its type / code. Stack frames keep the script's file name and position only.
+  const scrubErr = (e) => {
+    const code = e && typeof e === 'object' && (typeof e.code === 'number' || typeof e.code === 'string') ? String(e.code).slice(0, 24) + ' ' : '';
+    const text = e && typeof e === 'object' ? (e.message !== undefined || e instanceof Error ? e.name + ':' + e.message : 'object') : String(e);
+    return code + text.replace(/https?:\/\/\S+/g, '<url>').replace(/\d{5,}/g, '<id>').slice(0, 80);
+  };
+  const scrubStack = (s, n) => String(s || '').split('\n').slice(0, n)
+    .map((l) => l.replace(/https?:\/\/\S+/g, '<url>').replace(/file:\/\/\S*\/([^/\s]+)/g, '$1').slice(0, 160)).join(' < ');
   const page = location.pathname.split('/').pop();
 
   // ---- webpack access: lets Swift observe official services directly ----
@@ -60,7 +69,7 @@
         if (!proto || typeof proto.componentDidCatch !== 'function' || proto.componentDidCatch.__olaz) return;
         const original = proto.componentDidCatch;
         proto.componentDidCatch = function (error, info) {
-          diag('UI-CRASH ' + (error && error.name) + ': ' + (error && error.message) + ' | ' + String(error && error.stack || '').split('\n').slice(0, 6).join(' < ') + ' | component: ' + String(info && info.componentStack || '').split('\n').slice(0, 8).join(' < '));
+          diag('UI-CRASH ' + scrubErr(error) + ' | ' + scrubStack(error && error.stack, 6) + ' | component: ' + scrubStack(info && info.componentStack, 8));
           return original.call(this, error, info);
         };
         proto.componentDidCatch.__olaz = true;
@@ -147,7 +156,26 @@
             convs: pick((i) => typeof i.getConvByIdSync === 'function' && typeof i.addOrUpdateConv === 'function'),
             unread: pick((i) => typeof i.getUnreadByConvIdSync === 'function'),
             preview: pick((i) => typeof i.convertDBMessageToPreviewItem === 'function'),
+            pin: pick((i) => typeof i.getLimitPinnedConversation === 'function' && typeof i.pin === 'function'),
           };
+        };
+        // Official change events drive the list (throttled to one pass a second); the timer is a slow safety net for what
+        // has no event (names / avatars that resolve later). A pass walks every conversation, which costs tens of ms on a
+        // large account, so a 1.5 s poll alone kept the renderer at ~2% CPU while idle.
+        let soonTimer = null, lastRun = 0, hooked = false;
+        const runPublish = () => { lastRun = Date.now(); publish().catch((e) => diag('conversations publish failed: ' + scrubErr(e))); };
+        const publishSoon = () => {
+          if (soonTimer) return;
+          soonTimer = setTimeout(() => { soonTimer = null; runPublish(); }, Math.max(150, 1000 - (Date.now() - lastRun)));
+        };
+        const hookModules = (m) => {
+          if (hooked) return;
+          hooked = true;
+          const on = (mgr, names) => { if (mgr && typeof mgr.addEventListener === 'function') for (const n of names) safe(() => mgr.addEventListener(n, publishSoon), null); };
+          on(m.preview, ['PreviewChanged']);
+          on(m.unread, ['ChangeUnreadCount', 'ReadConv']);
+          on(m.convs, ['DeleteConv', 'LeaveGroup', 'AddConv', 'UpdateConv']);
+          on(m.pin, ['ChangePinConv']);
         };
         const safe = (fn, d) => { try { const v = fn(); return v === undefined ? d : v; } catch { return d; } };
         // Official preview formatter: module exporting `a(previewItem, opts) -> {icon, message,
@@ -182,7 +210,7 @@
                 } catch {}
               }
             }
-          } catch (e) { diag('preview formatter lookup failed: ' + e); }
+          } catch (e) { diag('preview formatter lookup failed: ' + scrubErr(e)); }
           if (!fn) return null;
           let lang = null;
           try {
@@ -253,6 +281,7 @@
           beginTick();
           if (!modules) { modules = await loadModules().catch(() => null); if (!modules || !modules.convs) { modules = null; return; } }
           const m = modules;
+          hookModules(m);
           const missing = [];
           const changed = [];
           const seen = new Set();
@@ -284,8 +313,8 @@
             published = true;
           }
         };
-        convTimer = setInterval(() => { publish().catch((e) => diag('conversations publish failed: ' + e)); }, 1500);
-        publish().catch(() => {});
+        convTimer = setInterval(() => { if (!modules || Date.now() - lastRun >= 4500) runPublish(); }, 1500);
+        runPublish();
       };
       if (!tryAttach()) { const t = setInterval(() => { if (tryAttach()) clearInterval(t); }, 500); }
       return true;
@@ -329,10 +358,10 @@
             if (name === 'constructor' || typeof fn !== 'function' || fn.__olazTrace) continue;
             target[name] = function (...args) {
               let out;
-              try { out = fn.apply(this, args); } catch (e) { diag('trust ' + name + ' threw: ' + (e && (e.code || '') + ' ' + (e.message || e))); throw e; }
+              try { out = fn.apply(this, args); } catch (e) { diag('trust ' + name + ' threw: ' + scrubErr(e)); throw e; }
               if (out && typeof out.then === 'function') {
                 diag('trust ' + name + ' started');
-                out.then(() => diag('trust ' + name + ' ok'), (e) => diag('trust ' + name + ' FAILED: ' + (e && ((e.code || '') + ' ' + (e.message || JSON.stringify(e))))));
+                out.then(() => diag('trust ' + name + ' ok'), (e) => diag('trust ' + name + ' FAILED: ' + scrubErr(e)));
               }
               return out;
             };

@@ -1,9 +1,48 @@
 import AppKit
 import CommonCrypto
 import CryptoKit
+import UniformTypeIdentifiers
 import os
 
 private let mainLog = Logger(subsystem: "app.olaz", category: "main-process")
+
+/// What `__shell__` (Electron `shell.openPath`) may hand to `NSWorkspace.open`: folders and documents, never
+/// something that runs code. Mirrors `FileCard.mayExecute` / `CloudFiles.mayExecute` (Views) and additionally
+/// checks the item on disk (symlink target, real content type, application bundles, execute permission).
+enum ShellOpenPolicy {
+    static let blockedExtensions: Set<String> = [
+        "command", "tool", "terminal", "fileloc", "webloc", "inetloc", "pkg", "mpkg", "app",
+        "scpt", "scptd", "workflow", "action", "sh", "bash", "zsh", "csh", "ksh", "jar", "dylib", "bundle",
+    ]
+
+    static func typeMayExecute(_ type: UTType) -> Bool {
+        let packageTypes = ["com.apple.installer-package-archive", "com.apple.finder.fileloc", "com.apple.terminal.shell-script",
+                            "com.apple.web-internet-location", "com.apple.application-script-binary"].compactMap { UTType($0) }
+        return type.conforms(to: .executable) || type.conforms(to: .applicationBundle) || type.conforms(to: .package)
+            || type.conforms(to: .shellScript) || type.conforms(to: .script) || type.conforms(to: .internetLocation)
+            || packageTypes.contains(where: { type.conforms(to: $0) })
+    }
+
+    static func extensionMayExecute(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        guard !ext.isEmpty else { return false }
+        if blockedExtensions.contains(ext) { return true }
+        return UTType(filenameExtension: ext).map(typeMayExecute) ?? false
+    }
+
+    static func mayOpen(_ url: URL) -> Bool {
+        let resolved = url.resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: resolved.path, isDirectory: &isDirectory) else { return false }
+        if extensionMayExecute(url) || extensionMayExecute(resolved) { return false }
+        let values = try? resolved.resourceValues(forKeys: [.isApplicationKey, .isPackageKey, .contentTypeKey])
+        if values?.isApplication == true || values?.isPackage == true { return false }
+        if let type = values?.contentType, typeMayExecute(type) { return false }
+        // A plain folder opens in Finder. A file with an execute bit (Mach-O / script without extension) would run in Terminal.
+        if isDirectory.boolValue { return true }
+        return !FileManager.default.isExecutableFile(atPath: resolved.path)
+    }
+}
 
 /// Swift stand-in for the Electron **main process** of Zalo PC.
 ///
@@ -129,6 +168,16 @@ final class ZaloMainProcess {
         ]
         if alreadyLogin { query["already_login"] = "y" }
         return query
+    }
+
+    /// Last `request_relaunch` answered (`reloadPages` at most once a minute for it).
+    private var lastRelaunch: Date?
+
+    /// What Electron's relaunch amounts to here: adapter state reset, the shared worker restarted, the page loaded again.
+    private func reloadPages() {
+        normalizeDatabaseAdapterState()
+        if hasSession { startSharedWorker() } else { stopSharedWorker() }
+        host?.load(hasSession ? .main : .login, query: pageQuery())
     }
 
     func start() {
@@ -307,9 +356,23 @@ final class ZaloMainProcess {
         bridge.handle("migratedb:signal_restart") { [weak self] _ in
             guard let self else { return nil }
             mainLog.notice("renderer requested restart for DB migration — reloading on \(self.storage.rawValue, privacy: .public)")
-            self.normalizeDatabaseAdapterState()
-            if self.hasSession { self.startSharedWorker() } else { self.stopSharedWorker() }
-            self.host?.load(self.hasSession ? .main : .login, query: self.pageQuery())
+            self.reloadPages()
+            return nil
+        }
+        // `$zapp.requestRelaunch`: the renderer's recovery path (`restartApp`, e.g. a session renewed during a slow
+        // start) sets its flag and waits for Electron's `app.relaunch()`. Unanswered, the page sits signed in with an
+        // empty inbox. At most one reload a minute, so a renderer that keeps asking cannot loop.
+        bridge.handle("request_relaunch") { [weak self] _ in
+            guard let self else { return nil }
+            let now = Date()
+            if let last = self.lastRelaunch, now.timeIntervalSince(last) < 60 {
+                mainLog.notice("renderer requested relaunch again within a minute — ignored")
+                return nil
+            }
+            self.lastRelaunch = now
+            mainLog.notice("renderer requested relaunch — reloading")
+            EngineLog.shared.write("relaunch requested by the renderer — reloading the pages")
+            self.reloadPages()
             return nil
         }
 
@@ -450,9 +513,19 @@ final class ZaloMainProcess {
         NativeNotifier.installIPC(on: bridge)
         bridge.handle("__shell__") { args in
             let path = args.string(1) ?? ""
+            guard !path.isEmpty else { return false }
+            let url = URL(fileURLWithPath: path)
             switch args.string(0) {
-            case "showItemInFolder": NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
-            default: return NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            case "showItemInFolder": NSWorkspace.shared.activateFileViewerSelecting([url])
+            default:
+                // Issue #1.2: never launch code on the renderer's word (same rule as the native file card):
+                // folders and documents open; apps, scripts, installers, executables are only revealed in Finder.
+                guard ShellOpenPolicy.mayOpen(url) else {
+                    mainLog.notice("shell.openPath refused (may run code): \(url.lastPathComponent, privacy: .private)")
+                    if FileManager.default.fileExists(atPath: url.path) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                    return false
+                }
+                return NSWorkspace.shared.open(url)
             }
             return true
         }

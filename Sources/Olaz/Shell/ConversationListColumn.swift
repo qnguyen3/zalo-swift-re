@@ -13,7 +13,7 @@ private enum ListItem: Identifiable {
     }
 }
 
-/// What the list shows: pinned tiles above the rows (inbox only).
+/// What the list shows: the pinned strip (and pins with unread messages) above the rows (inbox only).
 private struct Listing {
     var pins: [ZaloEngine.ConversationSummary] = []
     var rows: [ListItem] = []
@@ -30,17 +30,25 @@ private struct Listing {
 }
 
 /// Content column for the conversation mailboxes / labels: search field (and the label filter of the inbox) on top,
-/// pinned tiles, then the rows.
+/// the pinned strip, then the rows.
 struct ConversationListColumn: View {
     @Environment(ZaloEngine.self) private var engine
     @Environment(ShellModel.self) private var shell
     @State private var showLabelManager = false
     /// Hidden conversations listed because the search text is the PIN.
     @State private var pinMatches: [String] = []
+    /// Every pin is listed as a row under the strip, not only the ones with unread messages.
+    @AppStorage(OlazPrefs.pinsExpanded) private var pinsExpanded = false
     /// The search text the PIN search last ran for (nil on the first run of this view: re-appearing is not a search change).
     @State private var lastSearch: String?
     /// The hidden-chat state did not arrive for a long while: say so instead of spinning forever (everything stays locked).
     @State private var hiddenStateStalled = false
+    /// Read once for every row's swipe tint (an `@AppStorage` per row showed in the profile).
+    @AppStorage(OlazPrefs.accent) private var accent = OlazAccent.blue
+    /// Rows rendered so far: the list grows by `rowPage` when its end comes on screen. A SwiftUI `List` re-diffs every row
+    /// it holds on each conversation update, which on a large account cost ~75 ms per update.
+    @State private var rowLimit = Self.rowPage
+    private static let rowPage = 120
 
     private var extras: ConversationExtras { engine.conversationExtras }
     private var query: String { shell.search.trimmingCharacters(in: .whitespaces) }
@@ -89,7 +97,7 @@ struct ConversationListColumn: View {
         }
     }
 
-    /// In the inbox the pinned chats leave the rows and become tiles (not while searching: results are plain rows).
+    /// In the inbox the pinned chats leave the rows for the pinned strip (not while searching: results are plain rows).
     private var listing: Listing {
         let all = items
         guard destination == .inbox, !isSearching else { return Listing(rows: all) }
@@ -184,36 +192,67 @@ struct ConversationListColumn: View {
                     .selectionDisabled()
             }
             if !listing.pins.isEmpty {
-                ConversationListPinGrid(pins: listing.pins, showLabelManager: $showLabelManager)
-                    .listRowInsets(EdgeInsets(top: 2, leading: 10, bottom: 6, trailing: 10))
+                ConversationListPinStrip(pins: listing.pins, expanded: $pinsExpanded, showLabelManager: $showLabelManager)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 8))
+                    .listRowSeparator(.hidden)
+                    .selectionDisabled()
+                rows(surfacedPins(listing.pins).map(ListItem.conversation), compact: true)
+                Divider()
+                    .listRowInsets(EdgeInsets(top: 2, leading: 10, bottom: 2, trailing: 10))
                     .listRowSeparator(.hidden)
                     .selectionDisabled()
             }
+            let shown = Array(listing.rows.prefix(rowLimit))
             if isSearching {
-                Section("Cuộc trò chuyện") { rows(listing.rows) }
+                Section("Cuộc trò chuyện") { rows(shown) }
             } else {
-                rows(listing.rows)
+                rows(shown)
+            }
+            if listing.rows.count > shown.count {
+                // The end of the rendered rows came on screen: render the next page.
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity)
+                    .listRowSeparator(.hidden)
+                    .selectionDisabled()
+                    .onAppear { rowLimit = shown.count + Self.rowPage }
             }
         }
         .listStyle(.inset)
         .scrollEdgeEffectStyle(.soft, for: .top)
+        // Another mailbox / label / search starts from the first page again.
+        .onChange(of: destination) { _, _ in rowLimit = Self.rowPage }
+        .onChange(of: query) { _, _ in rowLimit = Self.rowPage }
     }
 
-    private func rows(_ items: [ListItem]) -> some View {
+    /// Pins shown as rows under the strip: all of them when expanded, else the ones with unread messages (or the manual
+    /// "chưa đọc" mark), newest message first. Muted chats too: their count is grey.
+    private func surfacedPins(_ pins: [ZaloEngine.ConversationSummary]) -> [ZaloEngine.ConversationSummary] {
+        if pinsExpanded { return pins }
+        return pins
+            .filter { $0.unread > 0 || engine.conversationActions.hasUnreadMark($0.id) }
+            .sorted { ($0.preview?.date ?? .distantPast) > ($1.preview?.date ?? .distantPast) }
+    }
+
+    /// `compact`: pinned rows under the strip (smaller, one-line preview, no pin glyph: the strip says it).
+    private func rows(_ items: [ListItem], compact: Bool = false) -> some View {
         ForEach(items) { item in
             switch item {
             case .conversation(let conversation):
-                ConversationListRow(conversation: conversation,
-                                    label: extras.label(of: conversation.id),
-                                    showsPin: !(destination == .inbox && !isSearching) && engine.conversationActions.isPinned(conversation.id),
-                                    unreadMark: engine.conversationActions.hasUnreadMark(conversation.id),
-                                    isStranger: destination != .strangers && extras.strangerIds.contains(conversation.id),
-                                    isSelf: conversation.id == engine.selfConversationId)
+                ConversationListItem(conversation: conversation,
+                                     label: extras.label(of: conversation.id),
+                                     showsPin: !(destination == .inbox && !isSearching) && engine.conversationActions.isPinned(conversation.id),
+                                     unreadMark: engine.conversationActions.hasUnreadMark(conversation.id),
+                                     isStranger: destination != .strangers && extras.strangerIds.contains(conversation.id),
+                                     isSelf: conversation.id == engine.selfConversationId,
+                                     compact: compact,
+                                     accent: accent,
+                                     showLabelManager: $showLabelManager)
+                    .equatable()
                     .tag(conversation.id)
-                    .listRowInsets(EdgeInsets(top: 5, leading: 10, bottom: 5, trailing: 10))
+                    .listRowInsets(EdgeInsets(top: compact ? 3 : 5, leading: 10, bottom: compact ? 3 : 5, trailing: 10))
+                    .listRowSeparator(compact ? .hidden : .automatic)
                     .alignmentGuide(.listRowSeparatorLeading) { _ in 64 }
-                    .modifier(ConversationListSwipeActions(conversation: conversation))
-                    .contextMenu { ConversationActionsMenu(conversationId: conversation.id, preset: .thread, showLabelManager: $showLabelManager) }
             case .strangerBox:
                 StrangerBoxRow(box: extras.strangerBox,
                                newest: extras.strangerBox.newestId.flatMap { id in engine.conversations.first { $0.id == id && !engine.conversationActions.isHidden(id) } }) {
@@ -226,7 +265,7 @@ struct ConversationListColumn: View {
         }
     }
 
-    /// ⌘1…⌘9 open the pinned tiles while the list is on screen.
+    /// ⌘1…⌘9 open the first nine pinned chats while the list is on screen (the strip order).
     private func pinShortcuts(_ pins: [ZaloEngine.ConversationSummary]) -> some View {
         ForEach(Array(pins.prefix(9).enumerated()), id: \.element.id) { index, conversation in
             Button("") { shell.selection = conversation.id }
@@ -309,5 +348,33 @@ private struct CreateGroupButton: View {
         .fixedSize()
         .help("Tạo nhóm trò chuyện (⇧⌘N)")
         .accessibilityLabel("Tạo nhóm")
+    }
+}
+
+/// One conversation row with its swipe actions and context menu. Equatable on what it shows, so an update of the list
+/// (another chat's preview, unread count…) re-evaluates only the rows that changed. What the row reads from the engine
+/// itself (typing, mute, action state) still invalidates it through observation.
+private struct ConversationListItem: View, Equatable {
+    let conversation: ZaloEngine.ConversationSummary
+    let label: ConversationExtras.Label?
+    let showsPin: Bool
+    let unreadMark: Bool
+    let isStranger: Bool
+    let isSelf: Bool
+    let compact: Bool
+    let accent: OlazAccent
+    @Binding var showLabelManager: Bool
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.conversation == rhs.conversation && lhs.label == rhs.label && lhs.showsPin == rhs.showsPin
+            && lhs.unreadMark == rhs.unreadMark && lhs.isStranger == rhs.isStranger && lhs.isSelf == rhs.isSelf
+            && lhs.compact == rhs.compact && lhs.accent == rhs.accent
+    }
+
+    var body: some View {
+        ConversationListRow(conversation: conversation, label: label, showsPin: showsPin, unreadMark: unreadMark,
+                            isStranger: isStranger, isSelf: isSelf, compact: compact)
+            .modifier(ConversationListSwipeActions(conversation: conversation, accent: accent))
+            .contextMenu { ConversationActionsMenu(conversationId: conversation.id, preset: .thread, showLabelManager: $showLabelManager) }
     }
 }

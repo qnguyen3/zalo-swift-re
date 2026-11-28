@@ -53,6 +53,22 @@ import Foundation
         #expect(list.items[0].message(in: [message(.text, id: "x")]) == nil && list.items[1].message(in: [mine]) == nil)
     }
 
+    @Test func quoteFindsItsMessage() throws {
+        let parsed = ChatMessage(json: ["id": "1", "kind": ["type": "text"],
+                                        "quote": ["senderName": "A", "text": "x", "msgId": "900", "cliMsgId": "500"]], fallbackConversation: "c")
+        let quote = try #require(parsed?.quote)
+        #expect(quote.msgId == "900" && quote.cliMsgId == "500")
+        // Mine by client id, theirs by server id, an album by its first photo.
+        #expect(quote.target(in: [message(.text, id: "500")])?.id == "500")
+        #expect(quote.target(in: [message(.text, id: "900")])?.id == "900")
+        #expect(quote.target(in: [message(.text, id: "900#0"), message(.text, id: "900#1")])?.id == "900#0")
+        #expect(quote.target(in: [message(.text, id: "9000")]) == nil)
+        // An image quote carries only the client id; someone else's row is keyed by the server id.
+        var theirs = message(.text, id: "8484"); theirs.altId = "500"
+        #expect(ChatMessage.Quote(senderName: "A", text: "x", cliMsgId: "500").target(in: [theirs])?.id == "8484")
+        #expect(ChatMessage.Quote(senderName: "A", text: "x").target(in: [message(.text, id: "")]) == nil)
+    }
+
     @Test func copyTextFollowsTheKind() {
         #expect(message(.text, text: "Xin chào").copyableText == "Xin chào")
         #expect(message(.text).copyableText == nil)
@@ -94,7 +110,7 @@ import Foundation
           o: function (m) { return m.status === -2; }, r: function (m) { return m.msgType === 2503; }, s: function (m) { return m.msgType === 2502; },
           F: function (m) { return m.msgType === 2502 && m.message.length === 1; }, l: function () { return false; }, I: function () { return false; }, R: function () { return false; }
         };
-        var cfg = { recallMessageMaxTime: 86400000, undo_delete: { enable: 1, timeout: 5600 }, enable_popup_confim_del: \(popupDel), forward_conv_limit: 3,
+        var cfg = { sendToMeId: 'cloud1', stickerUrl: '', recallMessageMaxTime: 86400000, undo_delete: { enable: 1, timeout: 5600 }, enable_popup_confim_del: \(popupDel), forward_conv_limit: 3,
           settings: { group: { topic_colors: [-14540254] } }, group_topics: { enable: 1, enable_pin_limit: 1, pin_limit: 2 } };
         var types = { cloud1: 1, g9: 2 };
         var groups = { g9: { userId: 'g9', creatorId: 'u5', setting: { setTopicOnly: \(setTopicOnly) }, topMember: [{ id: 'u5' }, { id: 'u6', isAdmin: true }] } };

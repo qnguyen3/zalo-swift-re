@@ -43,9 +43,29 @@ extension ZaloEngine {
         guard let data = try? JSONSerialization.data(withJSONObject: args, options: [.fragmentsAllowed]),
               let json = String(data: data, encoding: .utf8) else { return false }
         let script = "const c = window.__zaloChat; if (!c || !c.sendText) return 'missing'; return await c.sendText(...\(json));"
-        let result = await host?.evaluate(script) as? String
+        // A hung official send must not spin forever. No answer in time means "may still be sent": reported as pending and
+        // treated as taken (true), so the text is not handed back as failed and re-sent into a duplicate.
+        guard let answer = await raceTimeout(Self.sendTextTimeout, { [self] in JSBox(value: await host?.evaluate(script)) }) else {
+            EngineLog.shared.write("chat sendText → no answer in \(Int(Self.sendTextTimeout)) s (pending)")
+            CardActionCenter.shared.show(CardActionOutcome.noAnswerText, in: id)
+            return true
+        }
+        let result = answer.value as? String
         if result != "sent" { EngineLog.shared.write("chat sendText → \(result ?? "nil")") }
         return result == "sent"
+    }
+
+    /// Swift-side cap on one official text send (the page's own network retries normally answer well before).
+    static let sendTextTimeout: Double = 60
+
+    /// Logout: messages, history paging and typing banners of the previous account.
+    func resetChatState() {
+        messages = [:]
+        hasMoreHistory = [:]
+        historyTicks = [:]
+        typing = [:]
+        ChatTypingClock.tasks.values.forEach { $0.cancel() }
+        ChatTypingClock.tasks = [:]
     }
 
     /// Group members matching `query` (what follows the "@"), from the official suggestion engine:
@@ -105,11 +125,21 @@ extension ZaloEngine {
     private func mergeChat(_ chat: [String: Any], convId: String) {
         let incoming = (chat["messages"] as? [[String: Any]] ?? []).compactMap { Self.chatMessage($0, fallbackConversation: convId) }
         let removed = Set(chat["removed"] as? [String] ?? [])
-        let reset = chat["reset"] as? Bool ?? false
+        var reset = chat["reset"] as? Bool ?? false
         var list = reset ? [] : (messages[convId] ?? [])
+        var needsSort = reset
+        // Re-opening a chat this engine already holds: the adapter resends only its newest window (~15 messages) as a
+        // reset and pages the older ones back in a second later. Replacing the list dropped the older rows and re-added
+        // them (the open chat visibly reloaded). Keep what is older than the window; inside it the reset is authoritative.
+        if reset, let existing = messages[convId], !existing.isEmpty,
+           let oldest = incoming.min(by: { $0.date < $1.date }), existing.contains(where: { $0.id == oldest.id }) {
+            let window = Set(incoming.map(\.id))
+            list = existing.filter { $0.date < oldest.date || window.contains($0.id) }
+            reset = false
+            needsSort = true
+        }
         if !removed.isEmpty { list.removeAll { removed.contains($0.id) } }
         var index = list.enumerated().reduce(into: [String: Int]()) { $0[$1.element.id] = $1.offset }
-        var needsSort = reset
         for message in incoming {
             if let at = index[message.id] {
                 if list[at].date != message.date { needsSort = true }
@@ -125,7 +155,13 @@ extension ZaloEngine {
             list = list.enumerated().sorted { ($0.element.date, $0.offset) < ($1.element.date, $1.offset) }.map(\.element)
         }
         EngineLog.shared.write("chat merge conv=\(convId.prefix(4))… reset=\(reset) in=\(incoming.count) removed=\(removed.count) total=\(list.count) hasMore=\(chat["hasMore"] ?? "-")")
-        if messages[convId] != list { messages[convId] = list }
+        if messages[convId] != list {
+            messages[convId] = list
+        } else if incoming.count > 5 {
+            // A page of messages this list already holds (an older batch re-sent after a re-open): report the pull as done
+            // so the message list stops waiting and asks for the next page if the reader is still at the top.
+            historyTicks[convId, default: 0] += 1
+        }
         notePollMessages(incoming)
         if let hasMore = chat["hasMore"] as? Bool, hasMoreHistory[convId] != hasMore { hasMoreHistory[convId] = hasMore }
         if chat["grew"] as? Bool == true { historyTicks[convId, default: 0] += 1 }
